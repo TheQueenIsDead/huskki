@@ -1,21 +1,21 @@
-// ECU DID logger — initial snapshot then change-only
-// Uses autowp/arduino-mcp2515 + SD. ISO-TP + UDS (0x22, 0x3E, 0x27).
-// Output columns (Serial + SD rows): millis,DID,data_hex,u16be
+// ECU DID logger — Serial only (initial snapshot, then change-only)
+// Uses autowp/arduino-mcp2515. ISO-TP + UDS (0x22, 0x3E, 0x27).
+// Output rows to Serial (CSV): millis,DID,data_hex
+//
+// Depends on your did_list.h providing:
+//   extern const uint16_t DID_LIST[] PROGMEM;
+//   extern const size_t   DID_COUNT;
 
 #include <SPI.h>
 #include <mcp2515.h>
-#include <SD.h>
-#include "did_list.h"   // extern const uint16_t DID_LIST[] PROGMEM; extern const size_t DID_COUNT;
+#include "did_list.h"
 
-#define LOG_ONLY_ON_CHANGE 1   // after first snapshot, only log changes
-#define SERIAL_DATA_ONLY   1   // suppress all non-data Serial prints
-#define LOG_INCLUDE_U16BE 0   // 0 = omit column, 1 = include it
+#define LOG_ONLY_ON_CHANGE 1   // after first snapshot, only log when payload changes
 
 // ===== Pins / CAN config =====
 #define CAN_CS_PIN   9
 #define CAN_SPEED    CAN_500KBPS
-#define CAN_CLOCK    MCP_16MHZ        // set to MCP_8MHZ if your MCP2515 crystal is 8 MHz
-#define SD_CS_PIN    4
+#define CAN_CLOCK    MCP_16MHZ      // set to MCP_8MHZ if your MCP2515 crystal is 8 MHz
 
 // ===== UDS / ISO-TP constants =====
 static const uint32_t CAN_ID_REQ = 0x7E0;
@@ -34,13 +34,12 @@ static const uint32_t CAN_ID_RSP = 0x7E8;
 #define SA_L3_SendKey                  0x06
 
 const unsigned long TESTER_PRESENT_PERIOD_MS = 2000;
-// Keep your original pacing (fast list is short, so it still runs faster overall)
-const unsigned long FAST_GAP_MS  = 5;  // between FAST polls
-const unsigned long SLOW_GAP_MS  = 10;   // between SLOW polls
+const unsigned long FAST_GAP_MS  = 5;   // between FAST polls
+const unsigned long SLOW_GAP_MS  = 10;  // between SLOW polls (full list)
 
 #define MIN(a,b) ((a)<(b)?(a):(b))
 
-// ===== FAST list (tune as needed) =====
+// ===== FAST list (short = effectively faster polling) =====
 const uint16_t FAST_DIDS[] PROGMEM = {
   0x0100, // RPM (raw/4)
   0x0009, // Coolant °C (raw 1:1)
@@ -48,8 +47,7 @@ const uint16_t FAST_DIDS[] PROGMEM = {
   0x0070, // Grip (0..255)
   0x0001, // Throttle? (0..255)
   0x0031, // Gear enum
-  0x0064, // Switch (second byte 0/FF commonly seen)
-  0x0610, 0x0611, 0x0612, 0x0613, 0x0614, 0x0615 // temps 0.1°C, if supported
+  0x0064, // Switch (second byte toggles)
 };
 const size_t FAST_COUNT = sizeof(FAST_DIDS)/sizeof(FAST_DIDS[0]);
 
@@ -57,7 +55,6 @@ const size_t FAST_COUNT = sizeof(FAST_DIDS)/sizeof(FAST_DIDS[0]);
 MCP2515 mcp2515(CAN_CS_PIN);
 struct can_frame rxFrame, txFrame;
 
-File logFile;
 unsigned long lastTP = 0;
 unsigned long lastFastReq = 0, lastSlowReq = 0;
 size_t fastIndex = 0, slowIndex = 0;
@@ -70,8 +67,6 @@ static bool     loggedOnceFast[FAST_COUNT];
 static uint8_t  lastChkSlow[DID_COUNT];
 static uint8_t  lastLenSlow[DID_COUNT];
 static bool     loggedOnceSlow[DID_COUNT];
-
-static uint16_t writesSinceFlush = 0;
 
 // ===== Helpers =====
 bool isFastDid(uint16_t did, size_t* idxOut=nullptr) {
@@ -276,74 +271,47 @@ uint16_t readDID(uint16_t did, uint8_t* out, uint16_t maxLen) {
   return 0;
 }
 
-// ===== CSV logging (no labels, no scaling) =====
-void logLine(uint16_t did, const uint8_t* data, uint16_t len) {
-  // build hex payload (cap 32 bytes)
-  char hexbuf[3 * 32]; uint16_t n = (len > 32) ? 32 : len; uint16_t pos = 0;
+// ===== Serial logging (no labels, no scaling) =====
+void printHexPayload(const uint8_t* data, uint16_t len) {
   static const char *digits = "0123456789ABCDEF";
-  for (uint16_t i = 0; i < n; i++) {
-    if (i) hexbuf[pos++] = ' ';
+  for (uint16_t i = 0; i < len; i++) {
+    if (i) Serial.print(' ');
     uint8_t b = data[i];
-    hexbuf[pos++] = digits[(b >> 4) & 0xF];
-    hexbuf[pos++] = digits[b & 0xF];
+    Serial.print(digits[(b >> 4) & 0xF]);
+    Serial.print(digits[b & 0xF]);
   }
-  hexbuf[pos] = '\0';
-
-#if LOG_INCLUDE_U16BE
-  uint16_t u16 = (len >= 2) ? ((uint16_t)data[0] << 8 | data[1]) : (len >= 1 ? data[0] : 0);
-#endif
-
-  // SD
-  if (logFile) {
-    logFile.print(millis()); logFile.print(',');
-    logFile.print("0x"); logFile.print(did, HEX); logFile.print(',');
-    logFile.print(hexbuf);
-#if LOG_INCLUDE_U16BE
-    logFile.print(','); logFile.println(u16);
-#else
-    logFile.println();
-#endif
-    if (++writesSinceFlush >= 16) { logFile.flush(); writesSinceFlush = 0; }
-  }
-
-  // Serial
-  Serial.print(millis()); Serial.print(',');
-  Serial.print("0x"); Serial.print(did, HEX); Serial.print(',');
-  Serial.print(hexbuf);
-#if LOG_INCLUDE_U16BE
-  Serial.print(','); Serial.println(u16);
-#else
-  Serial.println();
-#endif
 }
 
-bool openLog() {
-  if (!SD.begin(SD_CS_PIN)) { return false; }
-  char name[20];
-  for (int i = 0; i < 100; i++) {
-    snprintf(name, sizeof(name), "DIDLOG%02d.CSV", i);
-    if (!SD.exists(name)) { logFile = SD.open(name, FILE_WRITE); break; }
-  }
-  if (!logFile) { return false; }
-  // header (SD only)
-#if LOG_INCLUDE_U16BE
-  logFile.println(F("millis,DID,data_hex,u16be"));
-#else
-  logFile.println(F("millis,DID,data_hex"));
-#endif
-  logFile.flush();
-  return true;
+void logLine(uint16_t did, const uint8_t* data, uint16_t len) {
+  Serial.print(millis());
+  Serial.print(',');
+  Serial.print("0x");
+  if (did < 0x1000) Serial.print('0'); // zero-pad width 4
+  if (did < 0x0100) Serial.print('0');
+  if (did < 0x0010) Serial.print('0');
+  Serial.print(did, HEX);
+  Serial.print(',');
+  printHexPayload(data, len);
+  Serial.println();
 }
 
 // ===== Setup / Loop =====
 void setup() {
-  Serial.begin(115200); while (!Serial) {}
+  Serial.begin(115200);
+
+  // Keep SPI master mode (UNO/Nano): pin 10 as OUTPUT
+  pinMode(10, OUTPUT);
+
+  // Only MCP2515 on SPI now
+  pinMode(CAN_CS_PIN, OUTPUT);
+  // No forced HIGH here (legacy behavior): let library handle CS
 
   mcp2515.reset();
   mcp2515.setBitrate(CAN_SPEED, CAN_CLOCK);
   mcp2515.setNormalMode();
 
-  (void)openLog();
+  // CSV header once
+  //Serial.println(F("millis,DID,data_hex"));
 
   // Try to unlock (best-effort)
   (void)securityAccessLevel(2);
@@ -393,7 +361,7 @@ void loop() {
   }
 
   // SLOW round-robin (skip DIDs that are in FAST to avoid duplicate logs)
-  if (now - lastSlowReq >= SLOW_GAP_MS) {
+  /*if (now - lastSlowReq >= SLOW_GAP_MS) {
     uint16_t did; memcpy_P(&did, &DID_LIST[slowIndex], sizeof(uint16_t));
     size_t dummy;
     if (!isFastDid(did, &dummy)) {
@@ -401,5 +369,5 @@ void loop() {
     }
     slowIndex = (slowIndex + 1) % DID_COUNT;
     lastSlowReq = now;
-  }
+  }*/
 }

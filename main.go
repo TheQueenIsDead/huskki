@@ -6,12 +6,13 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
 
-	ds "github.com/starfederation/datastar/sdk/go"
+	ds "github.com/starfederation/datastar-go/datastar"
 	"go.bug.st/serial"
 	"go.bug.st/serial/enumerator"
 )
@@ -31,7 +32,6 @@ func (h *hub) subscribe() (int, <-chan map[string]any, func()) {
 	id := h.next
 	h.next++
 	ch := make(chan map[string]any, 16)
-	// send current snapshot on subscribe
 	if len(h.last) > 0 {
 		ch <- h.copy(h.last)
 	}
@@ -61,7 +61,7 @@ func (h *hub) broadcast(sig map[string]any) {
 		h.last[k] = v
 	}
 	for _, ch := range h.subs {
-		select { // non-blocking
+		select {
 		case ch <- h.copy(sig):
 		default:
 		}
@@ -75,7 +75,7 @@ func main() {
 	addr := flag.String("addr", ":8080", "http listen address")
 	flag.Parse()
 
-	// open serial (auto-select Arduino-like USB port @ 115200 if -port=auto)
+	// auto-select Arduino-ish port if requested
 	if *port == "auto" {
 		name, err := autoSelectPort()
 		if err != nil {
@@ -90,25 +90,27 @@ func main() {
 		log.Fatalf("open serial %s: %v", *port, err)
 	}
 	log.Printf("Connected to %s @ %d", *port, *baud)
-	defer func(s serial.Port) {
-		err = s.Close()
-		if err != nil {
-			log.Fatalf("close serial: %v", err)
+	defer func() {
+		if err := s.Close(); err != nil {
+			log.Printf("close serial: %v", err)
 		}
-	}(s)
+	}()
 
 	h := newHub()
 
-	// serial reader
+	// read CSV lines from Arduino
 	go func() {
 		sc := bufio.NewScanner(s)
-		// handle long lines if needed
 		buf := make([]byte, 0, 64*1024)
 		sc.Buffer(buf, 1024*1024)
 
 		for sc.Scan() {
 			line := strings.TrimSpace(sc.Text())
-			// Expect: millis,DID,data_hex[,u16be...]
+
+			// print raw serial line to console
+			//log.Println("SER:", line)
+
+			// Expect: millis,DID,data_hex[,u16be]
 			parts := strings.SplitN(line, ",", 4)
 			if len(parts) < 3 {
 				continue
@@ -122,7 +124,6 @@ func main() {
 				continue
 			}
 			dataHex := parts[2]
-			// spaces like "12 34 56" -> "123456"
 			clean := strings.ReplaceAll(dataHex, " ", "")
 			if len(clean)%2 == 1 {
 				continue
@@ -133,14 +134,33 @@ func main() {
 			}
 
 			switch uint16(didVal) {
-			case 0x0100: // RPM: big-endian word / 4
+			case 0x0100: // RPM = u16be / 4
 				if len(b) >= 2 {
 					raw := int(b[0])<<8 | int(b[1])
 					rpm := raw / 4
 					h.broadcast(map[string]any{"rpm": rpm})
 				}
+			case 0x0076: // TPS (0..1023) → %
+				if len(b) >= 2 {
+					raw := int(b[0])<<8 | int(b[1])
+					if raw < 0 {
+						raw = 0
+					}
+					if raw > 1023 {
+						raw = 1023
+					}
+					pct := int(math.Round(float64(raw) * 100.0 / 1023.0))
+					fmt.Println(pct)
+					h.broadcast(map[string]any{"tps": pct})
+				}
+			case 0x0009: // Coolant °C (1:1)
+				if len(b) >= 2 {
+					val := int(b[0])<<8 | int(b[1])
+					h.broadcast(map[string]any{"coolant": val})
+				} else if len(b) == 1 {
+					h.broadcast(map[string]any{"coolant": int(b[0])})
+				}
 			}
-			// add more DIDs later: coolant, TPS, etc.
 		}
 		if err := sc.Err(); err != nil {
 			log.Printf("serial scanner error: %v", err)
@@ -150,20 +170,17 @@ func main() {
 	// HTTP: index
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "text/html; charset=utf-8")
-		_, err = fmt.Fprint(w, indexHTML)
-		if err != nil {
+		if _, err := fmt.Fprint(w, indexHTML); err != nil {
 			log.Printf("write index.html: %v", err)
 		}
 	})
 
-	// HTTP: SSE events
+	// HTTP: SSE
 	http.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
 		sse := ds.NewSSE(w, r)
 
 		_, ch, cancel := h.subscribe()
 		defer cancel()
-
-		// send initial snapshot handled by subscribe()
 
 		for {
 			select {
@@ -173,9 +190,18 @@ func main() {
 				if !ok {
 					return
 				}
-				// MergeSignals patches named signals in the client store via SSE.
-				if err := sse.MarshalAndMergeSignals(sig); err != nil {
-					return
+				var b strings.Builder
+				if v, ok := sig["rpm"]; ok {
+					fmt.Fprintf(&b, `<span id="rpm">%v</span>`, v)
+				}
+				if v, ok := sig["tps"]; ok {
+					fmt.Fprintf(&b, `<span id="tps">%v</span>`, v)
+				}
+				if v, ok := sig["coolant"]; ok {
+					fmt.Fprintf(&b, `<span id="coolant">%v</span>`, v)
+				}
+				if b.Len() > 0 {
+					_ = sse.PatchElements(b.String())
 				}
 			}
 		}
@@ -199,13 +225,11 @@ func autoSelectPort() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("enumerate ports: %w", err)
 	}
-	// Prefer known Arduino/clone VIDs
 	for _, p := range ports {
 		if p.IsUSB && preferredVIDs[strings.ToUpper(p.VID)] {
 			return p.Name, nil
 		}
 	}
-	// Fallback: any USB serial
 	for _, p := range ports {
 		if p.IsUSB {
 			return p.Name, nil
@@ -222,26 +246,32 @@ const indexHTML = `<!doctype html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>ECU Live RPM</title>
-<!-- Datastar client -->
-<script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@v0.21.4/bundles/datastar.js"></script>
+<title>ECU Live</title>
+<script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@main/bundles/datastar.js"></script>
 <style>
-  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; }
-  .card { display:inline-block; padding:1.25rem 1.5rem; border-radius:14px; box-shadow:0 8px 24px rgba(0,0,0,.08); }
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; display:flex; gap:1rem; flex-wrap:wrap; }
+  .card { padding:1.25rem 1.5rem; border-radius:14px; box-shadow:0 8px 24px rgba(0,0,0,.08); min-width:200px; }
   .label { color:#666; font-size:.9rem; }
   .value { font-size:3rem; font-weight:700; letter-spacing:.02em; }
   .unit { font-size:1.1rem; color:#777; padding-left:.25rem; }
 </style>
 </head>
 <body>
-  <!-- Establish SSE connection on load -->
   <div data-on-load="@get('/events', {openWhenHidden: true})"></div>
 
   <div class="card">
     <div class="label">RPM</div>
-    <div class="value">
-      <span data-text="$rpm ?? '—'"></span><span class="unit">rpm</span>
-    </div>
+    <div class="value"><span id="rpm">—</span><span class="unit">rpm</span></div>
+  </div>
+
+  <div class="card">
+    <div class="label">TPS</div>
+    <div class="value"><span id="tps">—</span><span class="unit">%</span></div>
+  </div>
+
+  <div class="card">
+    <div class="label">Coolant</div>
+    <div class="value"><span id="coolant">—</span><span class="unit">°C</span></div>
   </div>
 </body>
 </html>`
