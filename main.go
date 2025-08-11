@@ -209,6 +209,19 @@ func main() {
 				}
 				if v, ok := sig["tps"]; ok {
 					t.ExecuteTemplate(&b, "card.value", cardProps{Name: "TPS", Value: v})
+
+					err = sse.ExecuteScript(fmt.Sprintf(`
+let chart = Chart.getChart("tps-chart");
+chart.data.labels.push('%s');
+chart.data.datasets.forEach((dataset) => {
+	dataset.data.push('%s');
+});
+chart.update();
+`, 1234, v))
+					if err != nil {
+						log.Printf("execute script: %v", err)
+					}
+
 				}
 				if v, ok := sig["coolant"]; ok {
 					t.ExecuteTemplate(&b, "card.value", cardProps{Name: "Coolant", Value: v})
@@ -216,6 +229,7 @@ func main() {
 				if b.Len() > 0 {
 					_ = sse.PatchElements(b.String())
 				}
+
 			}
 		}
 	})
