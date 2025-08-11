@@ -8,25 +8,29 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	ds "github.com/starfederation/datastar-go/datastar"
 	"go.bug.st/serial"
 	"go.bug.st/serial/enumerator"
 )
 
-type hub struct {
+type eventHub struct {
 	mu   sync.Mutex
 	subs map[int]chan map[string]any
 	next int
 	last map[string]any
 }
 
-func newHub() *hub { return &hub{subs: map[int]chan map[string]any{}, last: map[string]any{}} }
+func newHub() *eventHub {
+	return &eventHub{subs: map[int]chan map[string]any{}, last: map[string]any{}}
+}
 
-func (h *hub) subscribe() (int, <-chan map[string]any, func()) {
+func (h *eventHub) subscribe() (int, <-chan map[string]any, func()) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	id := h.next
@@ -47,7 +51,7 @@ func (h *hub) subscribe() (int, <-chan map[string]any, func()) {
 	return id, ch, cancel
 }
 
-func (h *hub) copy(m map[string]any) map[string]any {
+func (h *eventHub) copy(m map[string]any) map[string]any {
 	out := make(map[string]any, len(m))
 	for k, v := range m {
 		out[k] = v
@@ -55,7 +59,7 @@ func (h *hub) copy(m map[string]any) map[string]any {
 	return out
 }
 
-func (h *hub) broadcast(sig map[string]any) {
+func (h *eventHub) broadcast(sig map[string]any) {
 	h.mu.Lock()
 	for k, v := range sig {
 		h.last[k] = v
@@ -73,98 +77,62 @@ func main() {
 	port := flag.String("port", "auto", "serial device path or 'auto'")
 	baud := flag.Int("baud", 115200, "baud rate (ignored when -port=auto)")
 	addr := flag.String("addr", ":8080", "http listen address")
+	replayFile := flag.String("replay", "", "path to replay file (csv log)")
 	flag.Parse()
 
-	// auto-select Arduino-ish port if requested
-	if *port == "auto" {
-		name, err := autoSelectPort()
-		if err != nil {
-			log.Fatalf("auto-select: %v", err)
-		}
-		*port = name
-		*baud = 115200
-	}
-	mode := &serial.Mode{BaudRate: *baud}
-	s, err := serial.Open(*port, mode)
-	if err != nil {
-		log.Fatalf("open serial %s: %v", *port, err)
-	}
-	log.Printf("Connected to %s @ %d", *port, *baud)
-	defer func() {
-		if err := s.Close(); err != nil {
-			log.Printf("close serial: %v", err)
-		}
-	}()
-
-	h := newHub()
-
-	// read CSV lines from Arduino
-	go func() {
-		sc := bufio.NewScanner(s)
-		buf := make([]byte, 0, 64*1024)
-		sc.Buffer(buf, 1024*1024)
-
-		for sc.Scan() {
-			line := strings.TrimSpace(sc.Text())
-
-			// print raw serial line to console
-			//log.Println("SER:", line)
-
-			// Expect: millis,DID,data_hex[,u16be]
-			parts := strings.SplitN(line, ",", 4)
-			if len(parts) < 3 {
-				continue
-			}
-			didStr := parts[1]
-			if !strings.HasPrefix(didStr, "0x") {
-				continue
-			}
-			didVal, err := strconv.ParseUint(didStr[2:], 16, 16)
+	var serialPort serial.Port
+	var err error
+	if *replayFile == "" {
+		// auto-select Arduino-ish port if requested
+		if *port == "auto" {
+			name, err := autoSelectPort()
 			if err != nil {
-				continue
+				log.Fatalf("auto-select: %v", err)
 			}
-			dataHex := parts[2]
-			clean := strings.ReplaceAll(dataHex, " ", "")
-			if len(clean)%2 == 1 {
-				continue
+			*port = name
+			*baud = 115200
+		}
+		mode := &serial.Mode{BaudRate: *baud}
+		serialPort, err = serial.Open(*port, mode)
+		if err != nil {
+			log.Fatalf("open serial %s: %v", *port, err)
+		}
+		log.Printf("Connected to %s @ %d", *port, *baud)
+		defer func() {
+			if err := serialPort.Close(); err != nil {
+				log.Printf("close serial: %v", err)
 			}
-			b, err := hex.DecodeString(clean)
-			if err != nil || len(b) == 0 {
-				continue
-			}
+		}()
+	}
 
-			switch uint16(didVal) {
-			case 0x0100: // RPM = u16be / 4
-				if len(b) >= 2 {
-					raw := int(b[0])<<8 | int(b[1])
-					rpm := raw / 4
-					h.broadcast(map[string]any{"rpm": rpm})
-				}
-			case 0x0076: // TPS (0..1023) → %
-				if len(b) >= 2 {
-					raw := int(b[0])<<8 | int(b[1])
-					if raw < 0 {
-						raw = 0
-					}
-					if raw > 1023 {
-						raw = 1023
-					}
-					pct := int(math.Round(float64(raw) * 100.0 / 1023.0))
-					fmt.Println(pct)
-					h.broadcast(map[string]any{"tps": pct})
-				}
-			case 0x0009: // Coolant °C (1:1)
-				if len(b) >= 2 {
-					val := int(b[0])<<8 | int(b[1])
-					h.broadcast(map[string]any{"coolant": val})
-				} else if len(b) == 1 {
-					h.broadcast(map[string]any{"coolant": int(b[0])})
-				}
+	hub := newHub()
+
+	// CSV lines from scanner
+	go func() {
+		var scanner *bufio.Scanner
+
+		isReplay := *replayFile != ""
+
+		if isReplay {
+			file, err := os.Open(*replayFile)
+			if err != nil {
+				log.Fatal(err)
 			}
+			defer func(file *os.File) {
+				err := file.Close()
+				if err != nil {
+					log.Fatal(err)
+				}
+			}(file)
+			scanner = bufio.NewScanner(file)
+		} else {
+			scanner = bufio.NewScanner(serialPort)
 		}
-		if err := sc.Err(); err != nil {
-			log.Printf("serial scanner error: %v", err)
-		}
+
+		buf := make([]byte, 0, 64*1024)
+		scanner.Buffer(buf, 1024*1024)
+
+		readScanner(scanner, hub, isReplay)
 	}()
 
 	// HTTP: index
@@ -179,7 +147,7 @@ func main() {
 	http.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
 		sse := ds.NewSSE(w, r)
 
-		_, ch, cancel := h.subscribe()
+		_, ch, cancel := hub.subscribe()
 		defer cancel()
 
 		for {
@@ -193,6 +161,12 @@ func main() {
 				var b strings.Builder
 				if v, ok := sig["rpm"]; ok {
 					fmt.Fprintf(&b, `<span id="rpm">%v</span>`, v)
+				}
+				if v, ok := sig["throttle"]; ok {
+					fmt.Fprintf(&b, `<span id="throttle">%v</span>`, v)
+				}
+				if v, ok := sig["grip"]; ok {
+					fmt.Fprintf(&b, `<span id="grip">%v</span>`, v)
 				}
 				if v, ok := sig["tps"]; ok {
 					fmt.Fprintf(&b, `<span id="tps">%v</span>`, v)
@@ -241,6 +215,108 @@ func autoSelectPort() (string, error) {
 	return "", fmt.Errorf("no serial ports found")
 }
 
+func readScanner(scanner *bufio.Scanner, hub *eventHub, isReplay bool) {
+	start := time.Now()
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+
+		// Expect: millis,DID,data_hex[,u16be]
+		parts := strings.SplitN(line, ",", 4)
+		if len(parts) < 3 {
+			continue
+		}
+		timestamp, err := strconv.Atoi(parts[0])
+		if err != nil {
+			log.Printf("parse timestamp: %v", err)
+			continue
+		}
+		didStr := parts[1]
+		if !strings.HasPrefix(didStr, "0x") {
+			continue
+		}
+		didVal, err := strconv.ParseUint(didStr[2:], 16, 16)
+		if err != nil {
+			continue
+		}
+		dataHex := parts[2]
+		clean := strings.ReplaceAll(dataHex, " ", "")
+		if len(clean)%2 == 1 {
+			continue
+		}
+		b, err := hex.DecodeString(clean)
+		if err != nil || len(b) == 0 {
+			continue
+		}
+
+		if isReplay {
+			elapsed := time.Now().Sub(start)
+			timeToWait := timestamp - int(elapsed.Milliseconds())
+			if timeToWait > 0 {
+				time.Sleep(time.Duration(timeToWait) * time.Millisecond)
+			}
+		}
+
+		fmt.Println(line)
+
+		switch uint16(didVal) {
+		case 0x0100: // RPM = u16be / 4
+			if len(b) >= 2 {
+				raw := int(b[0])<<8 | int(b[1])
+				rpm := raw / 4
+				hub.broadcast(map[string]any{"rpm": rpm})
+			}
+
+		case 0x0001: // Throttle: low byte range 3..17
+			if len(b) >= 1 {
+				raw8 := int(b[len(b)-1])
+				//pct := scalePct(raw8, 3, 17) // -> 0..100%
+				hub.broadcast(map[string]any{"throttle": raw8})
+			}
+
+		case 0x0070: // Grip: low byte range 10..23
+			if len(b) >= 1 {
+				raw8 := int(b[len(b)-1])
+				//pct := scalePct(raw8, 20, 59) // -> 0..100%
+				hub.broadcast(map[string]any{"grip": raw8})
+			}
+
+		case 0x0076: // TPS (0..1023) -> %
+			if len(b) >= 2 {
+				raw := int(b[0])<<8 | int(b[1])
+				if raw > 1023 {
+					raw = 1023
+				}
+				pct := (raw*100 + 511) / 1023 // integer rounding
+				hub.broadcast(map[string]any{"tps": pct})
+			}
+
+		case 0x0009: // Coolant °C
+			if len(b) >= 2 {
+				val := int(b[0])<<8 | int(b[1])
+				hub.broadcast(map[string]any{"coolant": val})
+			} else if len(b) == 1 {
+				hub.broadcast(map[string]any{"coolant": int(b[0])})
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		log.Printf("serial scanner error: %v", err)
+	}
+}
+
+func scalePct(raw, min, max int) int {
+	if max <= min {
+		return 0
+	}
+	if raw < min {
+		raw = min
+	}
+	if raw > max {
+		raw = max
+	}
+	return int(math.Round(float64(raw-min) * 100.0 / float64(max-min)))
+}
+
 const indexHTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -260,13 +336,23 @@ const indexHTML = `<!doctype html>
   <div data-on-load="@get('/events', {openWhenHidden: true})"></div>
 
   <div class="card">
-    <div class="label">RPM</div>
-    <div class="value"><span id="rpm">—</span><span class="unit">rpm</span></div>
+    <div class="label">Throttle</div>
+    <div class="value"><span id="throttle">—</span><span class="unit">%</span></div>
+  </div>
+
+  <div class="card">
+    <div class="label">Grip</div>
+    <div class="value"><span id="grip">—</span><span class="unit">%</span></div>
   </div>
 
   <div class="card">
     <div class="label">TPS</div>
     <div class="value"><span id="tps">—</span><span class="unit">%</span></div>
+  </div>
+
+  <div class="card">
+    <div class="label">RPM</div>
+    <div class="value"><span id="rpm">—</span><span class="unit">rpm</span></div>
   </div>
 
   <div class="card">

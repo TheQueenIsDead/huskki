@@ -1,4 +1,3 @@
-millis,DID,data_hex,u16be,label,scaled
 750,0x0,00 76,118,,
 755,0x100,00 00,0,RPM,0
 760,0x2,02 52,594,,
