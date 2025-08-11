@@ -22,6 +22,14 @@ import (
 
 const DEFAULT_BAUD_RATE = 115200
 
+const (
+	RPM_DID      = 0x0100
+	THROTTLE_DID = 0x0001
+	GRIP_DID     = 0x0070
+	TPS_DID      = 0x0076
+	COOLANT_DID  = 0x0009
+)
+
 // Arduino & clones common VIDs
 var preferredVIDs = map[string]bool{
 	"2341": true, // Arduino
@@ -204,7 +212,7 @@ func readScanner(scanner *bufio.Scanner, eventHub *hub.EventHub, isReplay bool) 
 			}
 		}
 
-		handleDid(eventHub, didVal, dataBytes)
+		handleDidData(eventHub, didVal, dataBytes)
 	}
 	if err := scanner.Err(); err != nil {
 		log.Printf("serial scanner error: %v", err)
@@ -242,30 +250,30 @@ func patch(req *http.Request, signalChan <-chan map[string]any, sse *ds.ServerSe
 	return false
 }
 
-func handleDid(eventHub *hub.EventHub, didVal uint64, dataBytes []byte) {
+func handleDidData(eventHub *hub.EventHub, didVal uint64, dataBytes []byte) {
 	switch uint16(didVal) {
-	case 0x0100: // RPM = u16be / 4
+	case RPM_DID: // RPM = u16be / 4
 		if len(dataBytes) >= 2 {
 			raw := int(dataBytes[0])<<8 | int(dataBytes[1])
 			rpm := raw / 4
 			eventHub.Broadcast(map[string]any{"rpm": rpm})
 		}
 
-	case 0x0001: // Throttle: (0..255?) no fucking clue what this is smoking, I think this is computed target throttle?
+	case THROTTLE_DID: // Throttle: (0..255?) no fucking clue what this is smoking, I think this is computed target throttle?
 		if len(dataBytes) >= 1 {
 			raw8 := int(dataBytes[len(dataBytes)-1])
 			//pct := scalePct(raw8, 3, 17) // -> 0..100%
 			eventHub.Broadcast(map[string]any{"throttle": raw8})
 		}
 
-	case 0x0070: // Grip: (0..255) gives raw pot value in percent from the grip (throttle twist)
+	case GRIP_DID: // Grip: (0..255) gives raw pot value in percent from the grip (throttle twist)
 		if len(dataBytes) >= 1 {
 			raw8 := int(dataBytes[len(dataBytes)-1])
 			//pct := scalePct(raw8, 20, 59) // -> 0..100%
 			eventHub.Broadcast(map[string]any{"grip": raw8})
 		}
 
-	case 0x0076: // TPS (0..1023) -> %
+	case TPS_DID: // TPS (0..1023) -> %
 		if len(dataBytes) >= 2 {
 			raw := int(dataBytes[0])<<8 | int(dataBytes[1])
 			if raw > 1023 {
@@ -275,7 +283,7 @@ func handleDid(eventHub *hub.EventHub, didVal uint64, dataBytes []byte) {
 			eventHub.Broadcast(map[string]any{"tps": pct})
 		}
 
-	case 0x0009: // Coolant °C
+	case COOLANT_DID: // Coolant °C
 		if len(dataBytes) >= 2 {
 			val := int(dataBytes[0])<<8 | int(dataBytes[1])
 			eventHub.Broadcast(map[string]any{"coolant": val})
