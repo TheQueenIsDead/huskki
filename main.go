@@ -88,6 +88,12 @@ var cards = []cardProps{
 	{"Coolant", 0, "°C"},
 }
 
+// tpsHistoryData contains all the data points of the throttle position history readings in order to display as a graph
+var tpsHistoryData []int
+
+// tpsHistoryLabels contains a timestamp (label) for each data point in history
+var tpsHistoryLabels []int
+
 func main() {
 	port := flag.String("port", "auto", "serial device path or 'auto'")
 	baud := flag.Int("baud", 115200, "baud rate (ignored when -port=auto)")
@@ -150,6 +156,7 @@ func main() {
 		readScanner(scanner, hub, isReplay)
 	}()
 
+	// Initialise HTML templating
 	t := template.New("").Funcs(template.FuncMap{
 		"ToLower": strings.ToLower,
 	})
@@ -164,6 +171,10 @@ func main() {
 
 		err := t.ExecuteTemplate(w, "index", map[string]interface{}{
 			"cards": cards,
+			"history": map[string]interface{}{
+				"tpsData":   tpsHistoryData,
+				"tpsLabels": tpsHistoryLabels,
+			},
 		})
 
 		if err != nil {
@@ -316,6 +327,8 @@ func readScanner(scanner *bufio.Scanner, hub *eventHub, isReplay bool) {
 				}
 				pct := (raw*100 + 511) / 1023 // integer rounding
 				hub.broadcast(map[string]any{"tps": pct})
+				tpsHistoryLabels = append(tpsHistoryLabels, timestamp)
+				tpsHistoryData = append(tpsHistoryData, pct)
 			}
 
 		case 0x0009: // Coolant °C

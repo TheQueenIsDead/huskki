@@ -32,18 +32,13 @@
 
 </body>
 <script>
-    const DATA_COUNT = 12;
-    const labels = [];
-    for (let i = 0; i < DATA_COUNT; ++i) {
-        labels.push(i.toString());
-    }
-    const datapoints = [0, 20, 20, 60, 60, 120, NaN, 180, 120, 125, 105, 110, 170];
+
     const data = {
-        labels: labels,
+        labels: {{ .history.tpsLabels }},
         datasets: [
             {
-                label: 'Linear interpolation (default)',
-                data: datapoints,
+                label: 'Throttle Position Sensor',
+                data: {{ .history.tpsData }},
                 fill: false
             }
         ]
