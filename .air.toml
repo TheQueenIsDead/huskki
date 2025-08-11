@@ -3,8 +3,8 @@ testdata_dir = "testdata"
 tmp_dir = "tmp"
 
 [build]
-  args_bin = []
-  bin = "./tmp/main -replay logs/DIDLOG11.CSV"
+  args_bin = ["-replay", "logs/DIDLOG11.CSV"]
+  bin = "./tmp/main"
   cmd = "go build -o ./tmp/main ."
   delay = 1000
   exclude_dir = ["assets", "tmp", "vendor", "testdata"]
@@ -22,7 +22,7 @@ tmp_dir = "tmp"
   poll_interval = 0
   post_cmd = []
   pre_cmd = []
-  rerun = false
+  rerun = true
   rerun_delay = 500
   send_interrupt = false
   stop_on_error = false
