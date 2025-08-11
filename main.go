@@ -210,14 +210,17 @@ func main() {
 				if v, ok := sig["tps"]; ok {
 					t.ExecuteTemplate(&b, "card.value", cardProps{Name: "TPS", Value: v})
 
+					fmt.Printf("Trying to push %v into the chart...\n", v)
 					err = sse.ExecuteScript(fmt.Sprintf(`
-let chart = Chart.getChart("tps-chart");
-chart.data.labels.push('%s');
-chart.data.datasets.forEach((dataset) => {
-	dataset.data.push('%s');
-});
-chart.update();
-`, 1234, v))
+(function(){
+	let chart = Chart.getChart("tps-chart");
+	chart.data.labels.push('%d');
+	chart.data.datasets.forEach((dataset) => {
+		dataset.data.push('%d');
+	});
+	chart.update();
+})()
+`, time.Now().UnixMilli(), v.(int))) // FIXME: Bad practice to cast like this
 					if err != nil {
 						log.Printf("execute script: %v", err)
 					}
@@ -227,7 +230,10 @@ chart.update();
 					t.ExecuteTemplate(&b, "card.value", cardProps{Name: "Coolant", Value: v})
 				}
 				if b.Len() > 0 {
-					_ = sse.PatchElements(b.String())
+					err = sse.PatchElements(b.String())
+					if err != nil {
+						fmt.Printf("patch elements: %v (%s)", err, b.String())
+					}
 				}
 
 			}
