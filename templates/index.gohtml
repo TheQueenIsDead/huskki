@@ -23,42 +23,9 @@
     {{ template "card" . }}
 {{ end }}
 
-<div class="card">
-    <h4 class="fw-bold">TPS</h4>
-    <canvas id="tps-chart" style="min-height: 500px"></canvas>
-</div>
-
-
-
+{{ template "chart" .tpsChartProps }}
+{{ template "chart" .rpmChartProps }}
 </body>
-<script>
-
-    const data = {
-        labels: {{ .history.tpsLabels }},
-        datasets: [
-            {
-                label: 'Throttle Position Sensor',
-                data: {{ .history.tpsData }},
-                fill: false
-            }
-        ]
-    };
-    // Bar Chart
-    new Chart(document.getElementById("tps-chart"), {
-        type: "line",
-        data: data,
-        options: {
-            // scales: {
-            //     // x: {
-            //     //     type: 'timeseries',
-            //     // },
-            //     y: {
-            //         beginAtZero: true
-            //     }
-            // }
-        }
-    });
-</script>
 
 </html>
 {{ end }}

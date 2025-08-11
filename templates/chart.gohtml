@@ -1,0 +1,34 @@
+{{ define "chart" }}
+
+<div class="card">
+    <h4 class="fw-bold">{{ .Name }}</h4>
+    <canvas id="{{ .Name | ToLower }}-chart" style="min-height: 250px"></canvas>
+</div>
+<script>
+
+    new Chart(document.getElementById("{{ .Name | ToLower }}-chart"), {
+        type: "line",
+        data: {
+            labels: {{ .Labels }},
+            datasets: [
+                {
+                    label: '{{ .Description }}',
+                    data: {{ .Data }},
+                    fill: false
+                }
+            ]
+        },
+        options: {
+            // TODO: Enable timeseries based X axis
+            // scales: {
+            //     // x: {
+            //     //     type: 'timeseries',
+            //     // },
+            //     y: {
+            //         beginAtZero: true
+            //     }
+            // }
+        }
+    });
+</script>
+{{ end }}

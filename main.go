@@ -88,11 +88,35 @@ var cards = []cardProps{
 	{"Coolant", 0, "°C"},
 }
 
+type chartProps struct {
+	Name        string
+	Description string
+	Labels      []int
+	Data        []int
+}
+
 // tpsHistoryData contains all the data points of the throttle position history readings in order to display as a graph
 var tpsHistoryData []int
 
 // tpsHistoryLabels contains a timestamp (label) for each data point in history
 var tpsHistoryLabels []int
+
+// rpmHistoryData contains all the data points of the revolutions per minute readings in order to display as a graph
+var rpmHistoryData []int
+
+// rpmHistoryLabels contains a timestamp (label) for each data point in history
+var rpmHistoryLabels []int
+
+func buildUpdateChartScript(name string, label, data int) string {
+	return fmt.Sprintf(`(function(){
+		let chart = Chart.getChart("%s-chart");
+		chart.data.labels.push('%d');
+		chart.data.datasets.forEach((dataset) => {
+			dataset.data.push('%d');
+		});
+		chart.update();
+	})()`, strings.ToLower(name), label, data)
+}
 
 func main() {
 	port := flag.String("port", "auto", "serial device path or 'auto'")
@@ -171,9 +195,17 @@ func main() {
 
 		err := t.ExecuteTemplate(w, "index", map[string]interface{}{
 			"cards": cards,
-			"history": map[string]interface{}{
-				"tpsData":   tpsHistoryData,
-				"tpsLabels": tpsHistoryLabels,
+			"tpsChartProps": chartProps{
+				Name:        "TPS",
+				Description: "Throttle Position Sensor",
+				Labels:      tpsHistoryLabels,
+				Data:        tpsHistoryData,
+			},
+			"rpmChartProps": chartProps{
+				Name:        "RPM",
+				Description: "Revolutions Per Minute",
+				Labels:      rpmHistoryLabels,
+				Data:        rpmHistoryData,
 			},
 		})
 
@@ -200,6 +232,10 @@ func main() {
 				var b strings.Builder
 				if v, ok := sig["rpm"]; ok {
 					t.ExecuteTemplate(&b, "card.value", cardProps{Name: "RPM", Value: v})
+					err = sse.ExecuteScript(buildUpdateChartScript("RPM", int(time.Now().UnixMilli()), v.(int))) // FIXME: Bad practice to cast like this
+					if err != nil {
+						log.Printf("execute script: %v", err)
+					}
 				}
 				if v, ok := sig["throttle"]; ok {
 					t.ExecuteTemplate(&b, "card.value", cardProps{Name: "Throttle", Value: v})
@@ -209,22 +245,10 @@ func main() {
 				}
 				if v, ok := sig["tps"]; ok {
 					t.ExecuteTemplate(&b, "card.value", cardProps{Name: "TPS", Value: v})
-
-					fmt.Printf("Trying to push %v into the chart...\n", v)
-					err = sse.ExecuteScript(fmt.Sprintf(`
-(function(){
-	let chart = Chart.getChart("tps-chart");
-	chart.data.labels.push('%d');
-	chart.data.datasets.forEach((dataset) => {
-		dataset.data.push('%d');
-	});
-	chart.update();
-})()
-`, time.Now().UnixMilli(), v.(int))) // FIXME: Bad practice to cast like this
+					err = sse.ExecuteScript(buildUpdateChartScript("TPS", int(time.Now().UnixMilli()), v.(int))) // FIXME: Bad practice to cast like this
 					if err != nil {
 						log.Printf("execute script: %v", err)
 					}
-
 				}
 				if v, ok := sig["coolant"]; ok {
 					t.ExecuteTemplate(&b, "card.value", cardProps{Name: "Coolant", Value: v})
@@ -323,6 +347,8 @@ func readScanner(scanner *bufio.Scanner, hub *eventHub, isReplay bool) {
 				raw := int(b[0])<<8 | int(b[1])
 				rpm := raw / 4
 				hub.broadcast(map[string]any{"rpm": rpm})
+				rpmHistoryLabels = append(rpmHistoryLabels, timestamp)
+				rpmHistoryData = append(rpmHistoryData, rpm)
 			}
 
 		case 0x0001: // Throttle: low byte range 3..17
