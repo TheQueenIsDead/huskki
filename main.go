@@ -212,7 +212,7 @@ func readScanner(scanner *bufio.Scanner, eventHub *hub.EventHub, isReplay bool) 
 			}
 		}
 
-		handleDidData(eventHub, didVal, dataBytes)
+		broadcastParsedSensorData(eventHub, didVal, dataBytes)
 	}
 	if err := scanner.Err(); err != nil {
 		log.Printf("serial scanner error: %v", err)
@@ -250,7 +250,7 @@ func patch(req *http.Request, signalChan <-chan map[string]any, sse *ds.ServerSe
 	return false
 }
 
-func handleDidData(eventHub *hub.EventHub, didVal uint64, dataBytes []byte) {
+func broadcastParsedSensorData(eventHub *hub.EventHub, didVal uint64, dataBytes []byte) {
 	switch uint16(didVal) {
 	case RPM_DID: // RPM = u16be / 4
 		if len(dataBytes) >= 2 {
