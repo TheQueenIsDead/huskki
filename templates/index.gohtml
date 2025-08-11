@@ -6,6 +6,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ECU Live</title>
     <script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@main/bundles/datastar.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
     <style>
         body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; display:flex; gap:1rem; flex-wrap:wrap; }
         .card { padding:1.25rem 1.5rem; border-radius:14px; box-shadow:0 8px 24px rgba(0,0,0,.08); min-width:200px; }
@@ -20,6 +22,48 @@
 {{ range .cards }}
     {{ template "card" . }}
 {{ end }}
+
+<div class="card">
+    <h4 class="fw-bold">TPS</h4>
+    <canvas id="tps-chart" style="min-height: 500px"></canvas>
+</div>
+
+
+
 </body>
+<script>
+    const DATA_COUNT = 12;
+    const labels = [];
+    for (let i = 0; i < DATA_COUNT; ++i) {
+        labels.push(i.toString());
+    }
+    const datapoints = [0, 20, 20, 60, 60, 120, NaN, 180, 120, 125, 105, 110, 170];
+    const data = {
+        labels: labels,
+        datasets: [
+            {
+                label: 'Linear interpolation (default)',
+                data: datapoints,
+                fill: false
+            }
+        ]
+    };
+    // Bar Chart
+    new Chart(document.getElementById("tps-chart"), {
+        type: "line",
+        data: data,
+        options: {
+            scales: {
+                // x: {
+                //     type: 'timeseries',
+                // },
+                y: {
+                    beginAtZero: true
+                }
+            }
+        }
+    });
+</script>
+
 </html>
 {{ end }}
