@@ -39,6 +39,52 @@ var preferredVIDs = map[string]bool{
 	"0403": true, // FTDI
 }
 
+type cardProps struct {
+	Name  string
+	Value any
+	Unit  string
+}
+
+var cards = []cardProps{
+	{"Throttle", 0, "%"},
+	{"Grip", 0, "%"},
+	{"TPS", 0, "%"},
+	{"RPM", 0, "RPM"},
+	{"Coolant", 0, "°C"},
+}
+
+type chartProps struct {
+	Name        string
+	Description string
+	Labels      []int
+	Data        []int
+}
+
+// tpsHistoryData contains all the data points of the throttle position history readings in order to display as a graph
+var tpsHistoryData []int
+
+// tpsHistoryLabels contains a timestamp (label) for each data point in history
+var tpsHistoryLabels []int
+
+// rpmHistoryData contains all the data points of the revolutions per minute readings in order to display as a graph
+var rpmHistoryData []int
+
+// rpmHistoryLabels contains a timestamp (label) for each data point in history
+var rpmHistoryLabels []int
+
+var Templates *template.Template
+
+func buildUpdateChartScript(name string, label, data int) string {
+	return fmt.Sprintf(`(function(){
+		let chart = Chart.getChart("%s-chart");
+		chart.data.labels.push('%d');
+		chart.data.datasets.forEach((dataset) => {
+			dataset.data.push('%d');
+		});
+		chart.update();
+	})()`, strings.ToLower(name), label, data)
+}
+
 func main() {
 	port, baud, addr, replayFile := getFlags()
 
@@ -62,7 +108,11 @@ func main() {
 		scan(isReplay, replayFile, serialPort, eventHub)
 	}()
 
-	dashTemplate, err := template.ParseGlob("*.gohtml")
+	// Initialise HTML templating
+	Templates = template.New("").Funcs(template.FuncMap{
+		"ToLower": strings.ToLower,
+	})
+	Templates, err = Templates.ParseGlob("templates/*.gohtml")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -71,7 +121,21 @@ func main() {
 
 	// HTTP: index
 	handler.HandleFunc("/", func(writer http.ResponseWriter, req *http.Request) {
-		err = dashTemplate.ExecuteTemplate(writer, "index", nil)
+		err := Templates.ExecuteTemplate(writer, "index", map[string]interface{}{
+			"cards": cards,
+			"tpsChartProps": chartProps{
+				Name:        "TPS",
+				Description: "Throttle Position Sensor",
+				Labels:      tpsHistoryLabels,
+				Data:        tpsHistoryData,
+			},
+			"rpmChartProps": chartProps{
+				Name:        "RPM",
+				Description: "Revolutions Per Minute",
+				Labels:      rpmHistoryLabels,
+				Data:        rpmHistoryData,
+			},
+		})
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -227,24 +291,26 @@ func patch(req *http.Request, signalChan <-chan map[string]any, sse *ds.ServerSe
 		if !ok {
 			return true
 		}
-		var buf []byte
+		var writer = strings.Builder{}
 		if v, ok := signal["rpm"]; ok {
-			buf = fmt.Appendf(buf, `<span id="rpm">%v</span>`, v)
+			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "RPM", Value: v})
+			_ = sse.ExecuteScript(buildUpdateChartScript("RPM", int(time.Now().UnixMilli()), v.(int))) // FIXME: Bad practice to cast like this
 		}
 		if v, ok := signal["throttle"]; ok {
-			buf = fmt.Appendf(buf, `<span id="throttle">%v</span>`, v)
+			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "Throttle", Value: v})
 		}
 		if v, ok := signal["grip"]; ok {
-			buf = fmt.Appendf(buf, `<span id="grip">%v</span>`, v)
+			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "Grip", Value: v})
 		}
 		if v, ok := signal["tps"]; ok {
-			buf = fmt.Appendf(buf, `<span id="tps">%v</span>`, v)
+			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "TPS", Value: v})
+			_ = sse.ExecuteScript(buildUpdateChartScript("RPM", int(time.Now().UnixMilli()), v.(int))) // FIXME: Bad practice to cast like this
 		}
 		if v, ok := signal["coolant"]; ok {
-			buf = fmt.Appendf(buf, `<span id="coolant">%v</span>`, v)
+			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "Coolant", Value: v})
 		}
-		if len(buf) > 0 {
-			_ = sse.PatchElements(string(buf))
+		if writer.Len() > 0 {
+			_ = sse.PatchElements(writer.String())
 		}
 	}
 	return false
@@ -257,6 +323,8 @@ func broadcastParsedSensorData(eventHub *hub.EventHub, didVal uint64, dataBytes 
 			raw := int(dataBytes[0])<<8 | int(dataBytes[1])
 			rpm := raw / 4
 			eventHub.Broadcast(map[string]any{"rpm": rpm})
+			rpmHistoryLabels = append(rpmHistoryLabels, timestamp)
+			rpmHistoryData = append(rpmHistoryData, rpm)
 		}
 
 	case THROTTLE_DID: // Throttle: (0..255?) no fucking clue what this is smoking, I think this is computed target throttle?
@@ -281,6 +349,8 @@ func broadcastParsedSensorData(eventHub *hub.EventHub, didVal uint64, dataBytes 
 			}
 			pct := (raw*100 + 511) / 1023 // integer rounding
 			eventHub.Broadcast(map[string]any{"tps": pct})
+			tpsHistoryLabels = append(tpsHistoryLabels, timestamp)
+			tpsHistoryData = append(tpsHistoryData, pct)
 		}
 
 	case COOLANT_DID: // Coolant °C
