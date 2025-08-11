@@ -6,13 +6,13 @@ import (
 	"flag"
 	"fmt"
 	"html/template"
+	"huskki/hub"
 	"log"
 	"math"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	ds "github.com/starfederation/datastar-go/datastar"
@@ -20,58 +20,23 @@ import (
 	"go.bug.st/serial/enumerator"
 )
 
-type eventHub struct {
-	mu   sync.Mutex
-	subs map[int]chan map[string]any
-	next int
-	last map[string]any
-}
+const DEFAULT_BAUD_RATE = 115200
 
-func newHub() *eventHub {
-	return &eventHub{subs: map[int]chan map[string]any{}, last: map[string]any{}}
-}
+const (
+	RPM_DID      = 0x0100
+	THROTTLE_DID = 0x0001
+	GRIP_DID     = 0x0070
+	TPS_DID      = 0x0076
+	COOLANT_DID  = 0x0009
+)
 
-func (h *eventHub) subscribe() (int, <-chan map[string]any, func()) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	id := h.next
-	h.next++
-	ch := make(chan map[string]any, 16)
-	if len(h.last) > 0 {
-		ch <- h.copy(h.last)
-	}
-	h.subs[id] = ch
-	cancel := func() {
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		if c, ok := h.subs[id]; ok {
-			close(c)
-			delete(h.subs, id)
-		}
-	}
-	return id, ch, cancel
-}
-
-func (h *eventHub) copy(m map[string]any) map[string]any {
-	out := make(map[string]any, len(m))
-	for k, v := range m {
-		out[k] = v
-	}
-	return out
-}
-
-func (h *eventHub) broadcast(sig map[string]any) {
-	h.mu.Lock()
-	for k, v := range sig {
-		h.last[k] = v
-	}
-	for _, ch := range h.subs {
-		select {
-		case ch <- h.copy(sig):
-		default:
-		}
-	}
-	h.mu.Unlock()
+// Arduino & clones common VIDs
+var preferredVIDs = map[string]bool{
+	"2341": true, // Arduino
+	"2A03": true, // Arduino (older)
+	"1A86": true, // CH340
+	"10C4": true, // CP210x
+	"0403": true, // FTDI
 }
 
 type cardProps struct {
@@ -107,6 +72,8 @@ var rpmHistoryData []int
 // rpmHistoryLabels contains a timestamp (label) for each data point in history
 var rpmHistoryLabels []int
 
+var Templates *template.Template
+
 func buildUpdateChartScript(name string, label, data int) string {
 	return fmt.Sprintf(`(function(){
 		let chart = Chart.getChart("%s-chart");
@@ -119,30 +86,14 @@ func buildUpdateChartScript(name string, label, data int) string {
 }
 
 func main() {
-	port := flag.String("port", "auto", "serial device path or 'auto'")
-	baud := flag.Int("baud", 115200, "baud rate (ignored when -port=auto)")
-	addr := flag.String("addr", ":8080", "http listen address")
-	replayFile := flag.String("replay", "", "path to replay file (csv log)")
-	flag.Parse()
+	port, baud, addr, replayFile := getFlags()
+
+	isReplay := *replayFile != ""
 
 	var serialPort serial.Port
 	var err error
-	if *replayFile == "" {
-		// auto-select Arduino-ish port if requested
-		if *port == "auto" {
-			name, err := autoSelectPort()
-			if err != nil {
-				log.Fatalf("auto-select: %v", err)
-			}
-			*port = name
-			*baud = 115200
-		}
-		mode := &serial.Mode{BaudRate: *baud}
-		serialPort, err = serial.Open(*port, mode)
-		if err != nil {
-			log.Fatalf("open serial %s: %v", *port, err)
-		}
-		log.Printf("Connected to %s @ %d", *port, *baud)
+	if !isReplay {
+		serialPort, err = getArduinoPort(port, baud, serialPort, err)
 		defer func() {
 			if err := serialPort.Close(); err != nil {
 				log.Printf("close serial: %v", err)
@@ -150,50 +101,27 @@ func main() {
 		}()
 	}
 
-	hub := newHub()
+	eventHub := hub.NewHub()
 
-	// CSV lines from scanner
+	// scan CSV lines from scanner
 	go func() {
-		var scanner *bufio.Scanner
-
-		isReplay := *replayFile != ""
-
-		if isReplay {
-			file, err := os.Open(*replayFile)
-			if err != nil {
-				log.Fatal(err)
-			}
-			defer func(file *os.File) {
-				err := file.Close()
-				if err != nil {
-					log.Fatal(err)
-				}
-			}(file)
-			scanner = bufio.NewScanner(file)
-		} else {
-			scanner = bufio.NewScanner(serialPort)
-		}
-
-		buf := make([]byte, 0, 64*1024)
-		scanner.Buffer(buf, 1024*1024)
-
-		readScanner(scanner, hub, isReplay)
+		scan(isReplay, replayFile, serialPort, eventHub)
 	}()
 
 	// Initialise HTML templating
-	t := template.New("").Funcs(template.FuncMap{
+	Templates = template.New("").Funcs(template.FuncMap{
 		"ToLower": strings.ToLower,
 	})
-	t, err = t.ParseGlob("templates/*.gohtml")
+	Templates, err = Templates.ParseGlob("templates/*.gohtml")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// HTTP: index
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("content-type", "text/html; charset=utf-8")
+	handler := http.NewServeMux()
 
-		err := t.ExecuteTemplate(w, "index", map[string]interface{}{
+	// HTTP: index
+	handler.HandleFunc("/", func(writer http.ResponseWriter, req *http.Request) {
+		err := Templates.ExecuteTemplate(writer, "index", map[string]interface{}{
 			"cards": cards,
 			"tpsChartProps": chartProps{
 				Name:        "TPS",
@@ -208,73 +136,55 @@ func main() {
 				Data:        rpmHistoryData,
 			},
 		})
-
 		if err != nil {
-			log.Printf("write index.html: %v", err)
+			log.Fatal(err)
 		}
 	})
 
 	// HTTP: SSE
-	http.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
-		sse := ds.NewSSE(w, r)
+	handler.HandleFunc("/events", func(writer http.ResponseWriter, req *http.Request) {
+		sse := ds.NewSSE(writer, req)
 
-		_, ch, cancel := hub.subscribe()
+		_, ch, cancel := eventHub.Subscribe()
 		defer cancel()
 
 		for {
-			select {
-			case <-r.Context().Done():
+			if patch(req, ch, sse) {
 				return
-			case sig, ok := <-ch:
-				if !ok {
-					return
-				}
-				var b strings.Builder
-				if v, ok := sig["rpm"]; ok {
-					t.ExecuteTemplate(&b, "card.value", cardProps{Name: "RPM", Value: v})
-					err = sse.ExecuteScript(buildUpdateChartScript("RPM", int(time.Now().UnixMilli()), v.(int))) // FIXME: Bad practice to cast like this
-					if err != nil {
-						log.Printf("execute script: %v", err)
-					}
-				}
-				if v, ok := sig["throttle"]; ok {
-					t.ExecuteTemplate(&b, "card.value", cardProps{Name: "Throttle", Value: v})
-				}
-				if v, ok := sig["grip"]; ok {
-					t.ExecuteTemplate(&b, "card.value", cardProps{Name: "Grip", Value: v})
-				}
-				if v, ok := sig["tps"]; ok {
-					t.ExecuteTemplate(&b, "card.value", cardProps{Name: "TPS", Value: v})
-					err = sse.ExecuteScript(buildUpdateChartScript("TPS", int(time.Now().UnixMilli()), v.(int))) // FIXME: Bad practice to cast like this
-					if err != nil {
-						log.Printf("execute script: %v", err)
-					}
-				}
-				if v, ok := sig["coolant"]; ok {
-					t.ExecuteTemplate(&b, "card.value", cardProps{Name: "Coolant", Value: v})
-				}
-				if b.Len() > 0 {
-					err = sse.PatchElements(b.String())
-					if err != nil {
-						fmt.Printf("patch elements: %v (%s)", err, b.String())
-					}
-				}
-
 			}
 		}
 	})
 
 	log.Printf("Listening on %s …", *addr)
-	log.Fatal(http.ListenAndServe(*addr, nil))
+	log.Fatal(http.ListenAndServe(*addr, handler))
 }
 
-// --- auto-detect a likely Arduino/clone serial device ---
-var preferredVIDs = map[string]bool{
-	"2341": true, // Arduino
-	"2A03": true, // Arduino (older)
-	"1A86": true, // CH340
-	"10C4": true, // CP210x
-	"0403": true, // FTDI
+func getFlags() (*string, *int, *string, *string) {
+	port := flag.String("port", "auto", "serial device path or 'auto'")
+	baud := flag.Int("baud", DEFAULT_BAUD_RATE, "baud rate")
+	addr := flag.String("addr", ":8080", "http listen address")
+	replayFile := flag.String("replay", "", "path to replay file (csv log)")
+	flag.Parse()
+	return port, baud, addr, replayFile
+}
+
+func getArduinoPort(port *string, baud *int, serialPort serial.Port, err error) (serial.Port, error) {
+	// auto-select Arduino-ish port if requested
+	if *port == "auto" {
+		name, err := autoSelectPort()
+		if err != nil {
+			log.Fatalf("auto-select: %v", err)
+		}
+		*port = name
+	}
+	mode := &serial.Mode{BaudRate: *baud}
+	serialPort, err = serial.Open(*port, mode)
+	if err != nil {
+		log.Fatalf("open serial %s: %v", *port, err)
+	}
+	log.Printf("Connected to %s @ %d", *port, *baud)
+
+	return serialPort, err
 }
 
 func autoSelectPort() (string, error) {
@@ -298,12 +208,38 @@ func autoSelectPort() (string, error) {
 	return "", fmt.Errorf("no serial ports found")
 }
 
-func readScanner(scanner *bufio.Scanner, hub *eventHub, isReplay bool) {
+func scan(isReplay bool, replayFile *string, serialPort serial.Port, eventHub *hub.EventHub) {
+	var scanner *bufio.Scanner
+
+	if isReplay {
+		file, err := os.Open(*replayFile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer func(file *os.File) {
+			err := file.Close()
+			if err != nil {
+				log.Fatal(err)
+			}
+		}(file)
+		scanner = bufio.NewScanner(file)
+	} else {
+		scanner = bufio.NewScanner(serialPort)
+	}
+
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
+	readScanner(scanner, eventHub, isReplay)
+}
+
+func readScanner(scanner *bufio.Scanner, eventHub *hub.EventHub, isReplay bool) {
 	start := time.Now()
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
+		fmt.Println(line)
 
-		// Expect: millis,DID,data_hex[,u16be]
+		// Parse lines; Expect; millis,DID,data_hex[,u16be]
 		parts := strings.SplitN(line, ",", 4)
 		if len(parts) < 3 {
 			continue
@@ -326,11 +262,12 @@ func readScanner(scanner *bufio.Scanner, hub *eventHub, isReplay bool) {
 		if len(clean)%2 == 1 {
 			continue
 		}
-		b, err := hex.DecodeString(clean)
-		if err != nil || len(b) == 0 {
+		dataBytes, err := hex.DecodeString(clean)
+		if err != nil || len(dataBytes) == 0 {
 			continue
 		}
 
+		// Replay timing
 		if isReplay {
 			elapsed := time.Now().Sub(start)
 			timeToWait := timestamp - int(elapsed.Milliseconds())
@@ -339,55 +276,90 @@ func readScanner(scanner *bufio.Scanner, hub *eventHub, isReplay bool) {
 			}
 		}
 
-		//fmt.Println(line)
-
-		switch uint16(didVal) {
-		case 0x0100: // RPM = u16be / 4
-			if len(b) >= 2 {
-				raw := int(b[0])<<8 | int(b[1])
-				rpm := raw / 4
-				hub.broadcast(map[string]any{"rpm": rpm})
-				rpmHistoryLabels = append(rpmHistoryLabels, timestamp)
-				rpmHistoryData = append(rpmHistoryData, rpm)
-			}
-
-		case 0x0001: // Throttle: low byte range 3..17
-			if len(b) >= 1 {
-				raw8 := int(b[len(b)-1])
-				//pct := scalePct(raw8, 3, 17) // -> 0..100%
-				hub.broadcast(map[string]any{"throttle": raw8})
-			}
-
-		case 0x0070: // Grip: low byte range 10..23
-			if len(b) >= 1 {
-				raw8 := int(b[len(b)-1])
-				//pct := scalePct(raw8, 20, 59) // -> 0..100%
-				hub.broadcast(map[string]any{"grip": raw8})
-			}
-
-		case 0x0076: // TPS (0..1023) -> %
-			if len(b) >= 2 {
-				raw := int(b[0])<<8 | int(b[1])
-				if raw > 1023 {
-					raw = 1023
-				}
-				pct := (raw*100 + 511) / 1023 // integer rounding
-				hub.broadcast(map[string]any{"tps": pct})
-				tpsHistoryLabels = append(tpsHistoryLabels, timestamp)
-				tpsHistoryData = append(tpsHistoryData, pct)
-			}
-
-		case 0x0009: // Coolant °C
-			if len(b) >= 2 {
-				val := int(b[0])<<8 | int(b[1])
-				hub.broadcast(map[string]any{"coolant": val})
-			} else if len(b) == 1 {
-				hub.broadcast(map[string]any{"coolant": int(b[0])})
-			}
-		}
+		broadcastParsedSensorData(eventHub, didVal, dataBytes)
 	}
 	if err := scanner.Err(); err != nil {
 		log.Printf("serial scanner error: %v", err)
+	}
+}
+
+func patch(req *http.Request, signalChan <-chan map[string]any, sse *ds.ServerSentEventGenerator) bool {
+	select {
+	case <-req.Context().Done():
+		return true
+	case signal, ok := <-signalChan:
+		if !ok {
+			return true
+		}
+		var writer = strings.Builder{}
+		if v, ok := signal["rpm"]; ok {
+			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "RPM", Value: v})
+			_ = sse.ExecuteScript(buildUpdateChartScript("RPM", int(time.Now().UnixMilli()), v.(int))) // FIXME: Bad practice to cast like this
+		}
+		if v, ok := signal["throttle"]; ok {
+			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "Throttle", Value: v})
+		}
+		if v, ok := signal["grip"]; ok {
+			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "Grip", Value: v})
+		}
+		if v, ok := signal["tps"]; ok {
+			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "TPS", Value: v})
+			_ = sse.ExecuteScript(buildUpdateChartScript("RPM", int(time.Now().UnixMilli()), v.(int))) // FIXME: Bad practice to cast like this
+		}
+		if v, ok := signal["coolant"]; ok {
+			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "Coolant", Value: v})
+		}
+		if writer.Len() > 0 {
+			_ = sse.PatchElements(writer.String())
+		}
+	}
+	return false
+}
+
+func broadcastParsedSensorData(eventHub *hub.EventHub, didVal uint64, dataBytes []byte) {
+	switch uint16(didVal) {
+	case RPM_DID: // RPM = u16be / 4
+		if len(dataBytes) >= 2 {
+			raw := int(dataBytes[0])<<8 | int(dataBytes[1])
+			rpm := raw / 4
+			eventHub.Broadcast(map[string]any{"rpm": rpm})
+			rpmHistoryLabels = append(rpmHistoryLabels, timestamp)
+			rpmHistoryData = append(rpmHistoryData, rpm)
+		}
+
+	case THROTTLE_DID: // Throttle: (0..255?) no fucking clue what this is smoking, I think this is computed target throttle?
+		if len(dataBytes) >= 1 {
+			raw8 := int(dataBytes[len(dataBytes)-1])
+			//pct := scalePct(raw8, 3, 17) // -> 0..100%
+			eventHub.Broadcast(map[string]any{"throttle": raw8})
+		}
+
+	case GRIP_DID: // Grip: (0..255) gives raw pot value in percent from the grip (throttle twist)
+		if len(dataBytes) >= 1 {
+			raw8 := int(dataBytes[len(dataBytes)-1])
+			//pct := scalePct(raw8, 20, 59) // -> 0..100%
+			eventHub.Broadcast(map[string]any{"grip": raw8})
+		}
+
+	case TPS_DID: // TPS (0..1023) -> %
+		if len(dataBytes) >= 2 {
+			raw := int(dataBytes[0])<<8 | int(dataBytes[1])
+			if raw > 1023 {
+				raw = 1023
+			}
+			pct := (raw*100 + 511) / 1023 // integer rounding
+			eventHub.Broadcast(map[string]any{"tps": pct})
+			tpsHistoryLabels = append(tpsHistoryLabels, timestamp)
+			tpsHistoryData = append(tpsHistoryData, pct)
+		}
+
+	case COOLANT_DID: // Coolant °C
+		if len(dataBytes) >= 2 {
+			val := int(dataBytes[0])<<8 | int(dataBytes[1])
+			eventHub.Broadcast(map[string]any{"coolant": val})
+		} else if len(dataBytes) == 1 {
+			eventHub.Broadcast(map[string]any{"coolant": int(dataBytes[0])})
+		}
 	}
 }
 
