@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"html/template"
 	"log"
 	"math"
 	"net/http"
@@ -73,6 +74,20 @@ func (h *eventHub) broadcast(sig map[string]any) {
 	h.mu.Unlock()
 }
 
+type cardProps struct {
+	Name  string
+	Value any
+	Unit  string
+}
+
+var cards = []cardProps{
+	{"Throttle", 0, "%"},
+	{"Grip", 0, "%"},
+	{"TPS", 0, "%"},
+	{"RPM", 0, "RPM"},
+	{"Coolant", 0, "°C"},
+}
+
 func main() {
 	port := flag.String("port", "auto", "serial device path or 'auto'")
 	baud := flag.Int("baud", 115200, "baud rate (ignored when -port=auto)")
@@ -135,10 +150,23 @@ func main() {
 		readScanner(scanner, hub, isReplay)
 	}()
 
+	t := template.New("").Funcs(template.FuncMap{
+		"ToLower": strings.ToLower,
+	})
+	t, err = t.ParseGlob("templates/*.gohtml")
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	// HTTP: index
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "text/html; charset=utf-8")
-		if _, err := fmt.Fprint(w, indexHTML); err != nil {
+
+		err := t.ExecuteTemplate(w, "index", map[string]interface{}{
+			"cards": cards,
+		})
+
+		if err != nil {
 			log.Printf("write index.html: %v", err)
 		}
 	})
@@ -160,19 +188,19 @@ func main() {
 				}
 				var b strings.Builder
 				if v, ok := sig["rpm"]; ok {
-					fmt.Fprintf(&b, `<span id="rpm">%v</span>`, v)
+					t.ExecuteTemplate(&b, "card.value", cardProps{Name: "RPM", Value: v})
 				}
 				if v, ok := sig["throttle"]; ok {
-					fmt.Fprintf(&b, `<span id="throttle">%v</span>`, v)
+					t.ExecuteTemplate(&b, "card.value", cardProps{Name: "Throttle", Value: v})
 				}
 				if v, ok := sig["grip"]; ok {
-					fmt.Fprintf(&b, `<span id="grip">%v</span>`, v)
+					t.ExecuteTemplate(&b, "card.value", cardProps{Name: "Grip", Value: v})
 				}
 				if v, ok := sig["tps"]; ok {
-					fmt.Fprintf(&b, `<span id="tps">%v</span>`, v)
+					t.ExecuteTemplate(&b, "card.value", cardProps{Name: "TPS", Value: v})
 				}
 				if v, ok := sig["coolant"]; ok {
-					fmt.Fprintf(&b, `<span id="coolant">%v</span>`, v)
+					t.ExecuteTemplate(&b, "card.value", cardProps{Name: "Coolant", Value: v})
 				}
 				if b.Len() > 0 {
 					_ = sse.PatchElements(b.String())
@@ -316,48 +344,3 @@ func scalePct(raw, min, max int) int {
 	}
 	return int(math.Round(float64(raw-min) * 100.0 / float64(max-min)))
 }
-
-const indexHTML = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>ECU Live</title>
-<script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@main/bundles/datastar.js"></script>
-<style>
-  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; display:flex; gap:1rem; flex-wrap:wrap; }
-  .card { padding:1.25rem 1.5rem; border-radius:14px; box-shadow:0 8px 24px rgba(0,0,0,.08); min-width:200px; }
-  .label { color:#666; font-size:.9rem; }
-  .value { font-size:3rem; font-weight:700; letter-spacing:.02em; }
-  .unit { font-size:1.1rem; color:#777; padding-left:.25rem; }
-</style>
-</head>
-<body>
-  <div data-on-load="@get('/events', {openWhenHidden: true})"></div>
-
-  <div class="card">
-    <div class="label">Throttle</div>
-    <div class="value"><span id="throttle">—</span><span class="unit">%</span></div>
-  </div>
-
-  <div class="card">
-    <div class="label">Grip</div>
-    <div class="value"><span id="grip">—</span><span class="unit">%</span></div>
-  </div>
-
-  <div class="card">
-    <div class="label">TPS</div>
-    <div class="value"><span id="tps">—</span><span class="unit">%</span></div>
-  </div>
-
-  <div class="card">
-    <div class="label">RPM</div>
-    <div class="value"><span id="rpm">—</span><span class="unit">rpm</span></div>
-  </div>
-
-  <div class="card">
-    <div class="label">Coolant</div>
-    <div class="value"><span id="coolant">—</span><span class="unit">°C</span></div>
-  </div>
-</body>
-</html>`
