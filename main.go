@@ -284,7 +284,7 @@ func readScanner(scanner *bufio.Scanner, hub *eventHub, isReplay bool) {
 			}
 		}
 
-		fmt.Println(line)
+		//fmt.Println(line)
 
 		switch uint16(didVal) {
 		case 0x0100: // RPM = u16be / 4
