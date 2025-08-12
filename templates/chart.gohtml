@@ -19,15 +19,28 @@
             ]
         },
         options: {
-            // TODO: Enable timeseries based X axis
-            // scales: {
-            //     // x: {
-            //     //     type: 'timeseries',
-            //     // },
+            animation: false,
+            scales: {
+                x: {
+                    type: 'time',
+                    time: {
+                        parse: 'x',
+                        unit: 'millisecond',
+                        displayFormats: {
+                            second: 'h:mm:ss a',
+                        }
+                    },
+                    ticks: {
+                        source: 'auto'
+                    },
+                    // type: 'logarithmic',
+                    // bounds: 'ticks'
+
+                }
             //     y: {
             //         beginAtZero: true
             //     }
-            // }
+            }
         }
     });
 </script>

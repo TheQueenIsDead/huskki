@@ -39,51 +39,20 @@ var preferredVIDs = map[string]bool{
 	"0403": true, // FTDI
 }
 
-type cardProps struct {
-	Name  string
-	Value any
-	Unit  string
-}
+var (
+	// tpsHistoryData contains all the data points of the throttle position history readings in order to display as a graph
+	tpsHistoryData []int
+	// tpsHistoryLabels contains a timestamp (label) for each data point in history
+	tpsHistoryLabels []int
+	// rpmHistoryData contains all the data points of the revolutions per minute readings in order to display as a graph
+	rpmHistoryData []int
+	// rpmHistoryLabels contains a timestamp (label) for each data point in history
+	rpmHistoryLabels []int
 
-var cards = []cardProps{
-	{"Throttle", 0, "%"},
-	{"Grip", 0, "%"},
-	{"TPS", 0, "%"},
-	{"RPM", 0, "RPM"},
-	{"Coolant", 0, "°C"},
-}
-
-type chartProps struct {
-	Name        string
-	Description string
-	Labels      []int
-	Data        []int
-}
-
-// tpsHistoryData contains all the data points of the throttle position history readings in order to display as a graph
-var tpsHistoryData []int
-
-// tpsHistoryLabels contains a timestamp (label) for each data point in history
-var tpsHistoryLabels []int
-
-// rpmHistoryData contains all the data points of the revolutions per minute readings in order to display as a graph
-var rpmHistoryData []int
-
-// rpmHistoryLabels contains a timestamp (label) for each data point in history
-var rpmHistoryLabels []int
-
-var Templates *template.Template
-
-func buildUpdateChartScript(name string, label, data int) string {
-	return fmt.Sprintf(`(function(){
-		let chart = Chart.getChart("%s-chart");
-		chart.data.labels.push('%d');
-		chart.data.datasets.forEach((dataset) => {
-			dataset.data.push('%d');
-		});
-		chart.update();
-	})()`, strings.ToLower(name), label, data)
-}
+	// Globals
+	Templates *template.Template
+	EventHub  *hub.EventHub
+)
 
 func main() {
 	port, baud, addr, replayFile := getFlags()
@@ -101,11 +70,11 @@ func main() {
 		}()
 	}
 
-	eventHub := hub.NewHub()
+	EventHub = hub.NewHub()
 
 	// scan CSV lines from scanner
 	go func() {
-		scan(isReplay, replayFile, serialPort, eventHub)
+		scan(isReplay, replayFile, serialPort, EventHub)
 	}()
 
 	// Initialise HTML templating
@@ -118,42 +87,8 @@ func main() {
 	}
 
 	handler := http.NewServeMux()
-
-	// HTTP: index
-	handler.HandleFunc("/", func(writer http.ResponseWriter, req *http.Request) {
-		err := Templates.ExecuteTemplate(writer, "index", map[string]interface{}{
-			"cards": cards,
-			"tpsChartProps": chartProps{
-				Name:        "TPS",
-				Description: "Throttle Position Sensor",
-				Labels:      tpsHistoryLabels,
-				Data:        tpsHistoryData,
-			},
-			"rpmChartProps": chartProps{
-				Name:        "RPM",
-				Description: "Revolutions Per Minute",
-				Labels:      rpmHistoryLabels,
-				Data:        rpmHistoryData,
-			},
-		})
-		if err != nil {
-			log.Fatal(err)
-		}
-	})
-
-	// HTTP: SSE
-	handler.HandleFunc("/events", func(writer http.ResponseWriter, req *http.Request) {
-		sse := ds.NewSSE(writer, req)
-
-		_, ch, cancel := eventHub.Subscribe()
-		defer cancel()
-
-		for {
-			if patch(req, ch, sse) {
-				return
-			}
-		}
-	})
+	handler.HandleFunc("/", IndexHandler)
+	handler.HandleFunc("/events", EventsHandler)
 
 	log.Printf("Listening on %s …", *addr)
 	log.Fatal(http.ListenAndServe(*addr, handler))
@@ -283,37 +218,67 @@ func readScanner(scanner *bufio.Scanner, eventHub *hub.EventHub, isReplay bool) 
 	}
 }
 
-func patch(req *http.Request, signalChan <-chan map[string]any, sse *ds.ServerSentEventGenerator) bool {
-	select {
-	case <-req.Context().Done():
-		return true
-	case signal, ok := <-signalChan:
-		if !ok {
-			return true
-		}
-		var writer = strings.Builder{}
-		if v, ok := signal["rpm"]; ok {
-			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "RPM", Value: v})
-			_ = sse.ExecuteScript(buildUpdateChartScript("RPM", int(time.Now().UnixMilli()), v.(int))) // FIXME: Bad practice to cast like this
-		}
-		if v, ok := signal["throttle"]; ok {
-			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "Throttle", Value: v})
-		}
-		if v, ok := signal["grip"]; ok {
-			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "Grip", Value: v})
-		}
-		if v, ok := signal["tps"]; ok {
-			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "TPS", Value: v})
-			_ = sse.ExecuteScript(buildUpdateChartScript("TPS", int(time.Now().UnixMilli()), v.(int))) // FIXME: Bad practice to cast like this
-		}
-		if v, ok := signal["coolant"]; ok {
-			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "Coolant", Value: v})
-		}
-		if writer.Len() > 0 {
-			_ = sse.PatchElements(writer.String())
+// generatePatch takes an event received from the event queue, iterates the cards that are displayed on the UI,
+// and returns a closure that can be used to patch the client.
+func generatePatch(event map[string]any) func(*ds.ServerSentEventGenerator) error {
+
+	var writer = strings.Builder{}
+	var funcs []func(generator *ds.ServerSentEventGenerator) error
+
+	// For each card, see if we have an update and template a response
+	for _, card := range cards {
+		if value, ok := event[strings.ToLower(card.Name)]; ok {
+			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: card.Name, Value: fmt.Sprintf("%v", value)})
 		}
 	}
-	return false
+
+	// For each chart see if we have an update and form an SSE update function
+	for _, chart := range charts {
+		value, ok := event[strings.ToLower(chart.Name)]
+		if !ok {
+			continue
+		}
+		timestamp, ok := event["timestamp"]
+		if !ok {
+			continue
+		}
+
+		v, ok := value.(int)
+		if !ok {
+			continue
+		}
+		ts, ok := timestamp.(int)
+		if !ok {
+			continue
+		}
+
+		funcs = append(funcs, func(sse *ds.ServerSentEventGenerator) error {
+			// FIXME: Bad practice to cast like this
+			err := sse.ExecuteScript(buildUpdateChartScript(chart.Name, ts, v))
+			return err
+		})
+	}
+
+	// Main closure
+	return func(sse *ds.ServerSentEventGenerator) error {
+		// Patch UI elements
+		if writer.String() != "" {
+			err := sse.PatchElements(writer.String())
+			if err != nil {
+				return err
+			}
+		}
+
+		// Exec client-side javascript
+		for _, f := range funcs {
+			err := f(sse)
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}
 }
 
 func broadcastParsedSensorData(eventHub *hub.EventHub, didVal uint64, dataBytes []byte, timestamp int) {
@@ -322,7 +287,7 @@ func broadcastParsedSensorData(eventHub *hub.EventHub, didVal uint64, dataBytes 
 		if len(dataBytes) >= 2 {
 			raw := int(dataBytes[0])<<8 | int(dataBytes[1])
 			rpm := raw / 4
-			eventHub.Broadcast(map[string]any{"rpm": rpm})
+			eventHub.Broadcast(map[string]any{"rpm": rpm, "timestamp": timestamp})
 			rpmHistoryLabels = append(rpmHistoryLabels, timestamp)
 			rpmHistoryData = append(rpmHistoryData, rpm)
 		}
@@ -331,14 +296,14 @@ func broadcastParsedSensorData(eventHub *hub.EventHub, didVal uint64, dataBytes 
 		if len(dataBytes) >= 1 {
 			raw8 := int(dataBytes[len(dataBytes)-1])
 			//pct := scalePct(raw8, 3, 17) // -> 0..100%
-			eventHub.Broadcast(map[string]any{"throttle": raw8})
+			eventHub.Broadcast(map[string]any{"throttle": raw8, "timestamp": timestamp})
 		}
 
 	case GRIP_DID: // Grip: (0..255) gives raw pot value in percent from the grip (throttle twist)
 		if len(dataBytes) >= 1 {
 			raw8 := int(dataBytes[len(dataBytes)-1])
 			//pct := scalePct(raw8, 20, 59) // -> 0..100%
-			eventHub.Broadcast(map[string]any{"grip": raw8})
+			eventHub.Broadcast(map[string]any{"grip": raw8, "timestamp": timestamp})
 		}
 
 	case TPS_DID: // TPS (0..1023) -> %
@@ -348,7 +313,7 @@ func broadcastParsedSensorData(eventHub *hub.EventHub, didVal uint64, dataBytes 
 				raw = 1023
 			}
 			pct := (raw*100 + 511) / 1023 // integer rounding
-			eventHub.Broadcast(map[string]any{"tps": pct})
+			eventHub.Broadcast(map[string]any{"tps": pct, "timestamp": timestamp})
 			tpsHistoryLabels = append(tpsHistoryLabels, timestamp)
 			tpsHistoryData = append(tpsHistoryData, pct)
 		}
@@ -356,9 +321,9 @@ func broadcastParsedSensorData(eventHub *hub.EventHub, didVal uint64, dataBytes 
 	case COOLANT_DID: // Coolant °C
 		if len(dataBytes) >= 2 {
 			val := int(dataBytes[0])<<8 | int(dataBytes[1])
-			eventHub.Broadcast(map[string]any{"coolant": val - 40})
+			eventHub.Broadcast(map[string]any{"coolant": val - 40, "timestamp": timestamp})
 		} else if len(dataBytes) == 1 {
-			eventHub.Broadcast(map[string]any{"coolant": int(dataBytes[0]) - 40})
+			eventHub.Broadcast(map[string]any{"coolant": int(dataBytes[0]) - 40, "timestamp": timestamp})
 		}
 	}
 }
