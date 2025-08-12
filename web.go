@@ -37,9 +37,12 @@ func buildUpdateChartScript(name string, label, data int) string {
 	return fmt.Sprintf(`(function(){
 		let chart = Chart.getChart("%s-chart");
 		chart.data.labels.push(%d);
-		chart.data.datasets.forEach((dataset) => {
-			dataset.data.push(%d);
-		});
+		chart.data.datasets[0].data.push(%d);
+
+		if (chart.data.labels.length > 20) {
+			chart.data.labels.shift();
+			chart.data.datasets[0].data.shift();
+		}
 		chart.update();
 	})()`, strings.ToLower(name), label, data)
 }
