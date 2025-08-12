@@ -276,7 +276,7 @@ func readScanner(scanner *bufio.Scanner, eventHub *hub.EventHub, isReplay bool) 
 			}
 		}
 
-		broadcastParsedSensorData(eventHub, didVal, dataBytes)
+		broadcastParsedSensorData(eventHub, didVal, dataBytes, timestamp)
 	}
 	if err := scanner.Err(); err != nil {
 		log.Printf("serial scanner error: %v", err)
@@ -304,7 +304,7 @@ func patch(req *http.Request, signalChan <-chan map[string]any, sse *ds.ServerSe
 		}
 		if v, ok := signal["tps"]; ok {
 			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "TPS", Value: v})
-			_ = sse.ExecuteScript(buildUpdateChartScript("RPM", int(time.Now().UnixMilli()), v.(int))) // FIXME: Bad practice to cast like this
+			_ = sse.ExecuteScript(buildUpdateChartScript("TPS", int(time.Now().UnixMilli()), v.(int))) // FIXME: Bad practice to cast like this
 		}
 		if v, ok := signal["coolant"]; ok {
 			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "Coolant", Value: v})
@@ -316,7 +316,7 @@ func patch(req *http.Request, signalChan <-chan map[string]any, sse *ds.ServerSe
 	return false
 }
 
-func broadcastParsedSensorData(eventHub *hub.EventHub, didVal uint64, dataBytes []byte) {
+func broadcastParsedSensorData(eventHub *hub.EventHub, didVal uint64, dataBytes []byte, timestamp int) {
 	switch uint16(didVal) {
 	case RPM_DID: // RPM = u16be / 4
 		if len(dataBytes) >= 2 {
@@ -356,9 +356,9 @@ func broadcastParsedSensorData(eventHub *hub.EventHub, didVal uint64, dataBytes 
 	case COOLANT_DID: // Coolant °C
 		if len(dataBytes) >= 2 {
 			val := int(dataBytes[0])<<8 | int(dataBytes[1])
-			eventHub.Broadcast(map[string]any{"coolant": val})
+			eventHub.Broadcast(map[string]any{"coolant": val - 40})
 		} else if len(dataBytes) == 1 {
-			eventHub.Broadcast(map[string]any{"coolant": int(dataBytes[0])})
+			eventHub.Broadcast(map[string]any{"coolant": int(dataBytes[0]) - 40})
 		}
 	}
 }
