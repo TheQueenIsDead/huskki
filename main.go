@@ -56,8 +56,82 @@ var cards = []cardProps{
 type chartProps struct {
 	Name        string
 	Description string
-	Labels      []int
-	Data        []int
+	Points      []Point
+	Path        string
+}
+
+type Point struct {
+	X     float64
+	Y     float64
+	Label string
+}
+
+// SVG Rendering Consts
+const (
+	// Chart dimensions
+	width         = 800.0
+	height        = 300.0
+	paddingLeft   = 60.0
+	paddingBottom = 60.0
+	paddingTop    = 40.0
+	paddingRight  = 40.0
+)
+
+func maxInt(arr []int) int {
+	max := math.MinInt
+	for _, v := range arr {
+		if v > max {
+			max = v
+		}
+	}
+	return max
+}
+
+func minInt(arr []int) int {
+	min := math.MaxInt
+	for _, v := range arr {
+		if v < min {
+			min = v
+		}
+	}
+	return min
+}
+
+func generateSVG(name, description string, data []int, labels []int) chartProps {
+	// Find min/max for scaling
+	maxVal := float64(maxInt(data))
+	minVal := float64(minInt(data))
+	maxTime := float64(maxInt(labels))
+	minTime := float64(minInt(labels))
+
+	scaleX := (width - paddingLeft - paddingRight) / (maxTime - minTime)
+	scaleY := (height - paddingTop - paddingBottom) / (maxVal - minVal)
+
+	points := []Point{}
+	path := ""
+
+	for i := range labels {
+		x := paddingLeft + (float64(labels[i])-minTime)*scaleX
+		// invert Y for SVG
+		y := height - paddingBottom - (float64(data[i])-minVal)*scaleY
+		points = append(points, Point{
+			X:     x,
+			Y:     y,
+			Label: fmt.Sprintf("%d", labels[i]),
+		})
+		if i == 0 {
+			path += fmt.Sprintf("M%.2f %.2f", x, y)
+		} else {
+			path += fmt.Sprintf(" L%.2f %.2f", x, y)
+		}
+	}
+
+	return chartProps{
+		Name:        name,
+		Description: description,
+		Points:      points,
+		Path:        path,
+	}
 }
 
 // tpsHistoryData contains all the data points of the throttle position history readings in order to display as a graph
@@ -73,17 +147,6 @@ var rpmHistoryData []int
 var rpmHistoryLabels []int
 
 var Templates *template.Template
-
-func buildUpdateChartScript(name string, label, data int) string {
-	return fmt.Sprintf(`(function(){
-		let chart = Chart.getChart("%s-chart");
-		chart.data.labels.push('%d');
-		chart.data.datasets.forEach((dataset) => {
-			dataset.data.push('%d');
-		});
-		chart.update();
-	})()`, strings.ToLower(name), label, data)
-}
 
 func main() {
 	port, baud, addr, replayFile := getFlags()
@@ -122,19 +185,9 @@ func main() {
 	// HTTP: index
 	handler.HandleFunc("/", func(writer http.ResponseWriter, req *http.Request) {
 		err := Templates.ExecuteTemplate(writer, "index", map[string]interface{}{
-			"cards": cards,
-			"tpsChartProps": chartProps{
-				Name:        "TPS",
-				Description: "Throttle Position Sensor",
-				Labels:      tpsHistoryLabels,
-				Data:        tpsHistoryData,
-			},
-			"rpmChartProps": chartProps{
-				Name:        "RPM",
-				Description: "Revolutions Per Minute",
-				Labels:      rpmHistoryLabels,
-				Data:        rpmHistoryData,
-			},
+			"cards":         cards,
+			"tpsChartProps": generateSVG("TPS", "Throotle", tpsHistoryData, tpsHistoryLabels),
+			"rpmChartProps": generateSVG("RPM", "Revvies", rpmHistoryData, rpmHistoryLabels),
 		})
 		if err != nil {
 			log.Fatal(err)
@@ -294,7 +347,7 @@ func patch(req *http.Request, signalChan <-chan map[string]any, sse *ds.ServerSe
 		var writer = strings.Builder{}
 		if v, ok := signal["rpm"]; ok {
 			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "RPM", Value: v})
-			_ = sse.ExecuteScript(buildUpdateChartScript("RPM", int(time.Now().UnixMilli()), v.(int))) // FIXME: Bad practice to cast like this
+			Templates.ExecuteTemplate(&writer, "chart", generateSVG("RPM", "Revvies", rpmHistoryData, rpmHistoryLabels))
 		}
 		if v, ok := signal["throttle"]; ok {
 			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "Throttle", Value: v})
@@ -304,7 +357,8 @@ func patch(req *http.Request, signalChan <-chan map[string]any, sse *ds.ServerSe
 		}
 		if v, ok := signal["tps"]; ok {
 			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "TPS", Value: v})
-			_ = sse.ExecuteScript(buildUpdateChartScript("TPS", int(time.Now().UnixMilli()), v.(int))) // FIXME: Bad practice to cast like this
+			Templates.ExecuteTemplate(&writer, "chart", generateSVG("TPS", "Throotle", tpsHistoryData, tpsHistoryLabels))
+
 		}
 		if v, ok := signal["coolant"]; ok {
 			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "Coolant", Value: v})
