@@ -281,19 +281,8 @@ uint16_t readDID(uint16_t did, uint8_t* out, uint16_t maxLen) {
   return 0;
 }
 
-// ===== Serial logging (no labels, no scaling) =====
-void printHexPayload(const uint8_t* data, uint16_t len) {
-  static const char *digits = "0123456789ABCDEF";
-  for (uint16_t i = 0; i < len; i++) {
-    if (i) Serial.print(' ');
-    uint8_t b = data[i];
-    Serial.print(digits[(b >> 4) & 0xF]);
-    Serial.print(digits[b & 0xF]);
-  }
-}
-
-// --- CRC-8-CCITT (poly 0x07, init 0x00), MSB-first, no reflection ---
-static inline uint8_t crc8_ccitt_step(uint8_t crc, uint8_t b) {
+// --- CRC-8-CCITT (poly 0x07), init 0x00
+static inline uint8_t crc8_ccitt_update(uint8_t crc, uint8_t b) {
   crc ^= b;
   for (uint8_t i = 0; i < 8; i++) {
     crc = (crc & 0x80) ? ((crc << 1) ^ 0x07) : (crc << 1);
@@ -348,9 +337,6 @@ void setup() {
   mcp2515.reset();
   mcp2515.setBitrate(CAN_SPEED, CAN_CLOCK);
   mcp2515.setNormalMode();
-
-  // CSV header once
-  //Serial.println(F("millis,DID,data_hex"));
 
   // Try to unlock (best-effort)
   (void)securityAccessLevel(2);
