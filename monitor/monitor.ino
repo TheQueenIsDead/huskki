@@ -292,54 +292,46 @@ void printHexPayload(const uint8_t* data, uint16_t len) {
   }
 }
 
-// --- CRC-8-CCITT (poly 0x07), init 0x00
-static inline uint8_t crc8_ccitt_update(uint8_t crc, uint8_t b) {
+// --- CRC-8-CCITT (poly 0x07, init 0x00), MSB-first, no reflection ---
+static inline uint8_t crc8_ccitt_step(uint8_t crc, uint8_t b) {
   crc ^= b;
   for (uint8_t i = 0; i < 8; i++) {
-    crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0x07) : (uint8_t)(crc << 1);
+    crc = (crc & 0x80) ? ((crc << 1) ^ 0x07) : (crc << 1);
   }
   return crc;
 }
-
-static uint8_t crc8_ccitt_buf(const uint8_t* p, size_t n) {
-  uint8_t crc = 0x00;
-  while (n--) crc = crc8_ccitt_update(crc, *p++);
+static inline uint8_t crc8_ccitt_buf(uint8_t crc, const uint8_t* p, size_t n) {
+  while (n--) crc = crc8_ccitt_step(crc, *p++);
   return crc;
 }
 
-// Write one binary record: magic, millis, DID, len, data, crc
-void logLine(uint16_t did, const uint8_t* data, uint8_t len) {
-  // Magic for resync
-  const uint8_t magic[2] = { 0xAA, 0x55 };
-  Serial.write(magic, 2);
-
-  // millis (LE)
+void sendFrame(uint16_t did, const uint8_t* data, uint8_t len) {
   uint32_t ms = millis();
-  uint8_t msb[4] = {
-    (uint8_t)(ms >> 0),
-    (uint8_t)(ms >> 8),
-    (uint8_t)(ms >> 16),
-    (uint8_t)(ms >> 24)
-  };
-  Serial.write(msb, 4);
 
-  // DID (BE / network order)
-  uint8_t didbe[2] = { (uint8_t)(did >> 8), (uint8_t)(did & 0xFF) };
-  Serial.write(didbe, 2);
+  // Build header exactly as Go expects
+  uint8_t hdr[7];
+  hdr[0] = (uint8_t)(ms);
+  hdr[1] = (uint8_t)(ms >> 8);
+  hdr[2] = (uint8_t)(ms >> 16);
+  hdr[3] = (uint8_t)(ms >> 24);
+  hdr[4] = (uint8_t)(did >> 8);   // DID big-endian
+  hdr[5] = (uint8_t)(did);
+  hdr[6] = len;
 
-  // payload length and payload
-  Serial.write(&len, 1);
-  if (len) Serial.write(data, len);
-
-  // CRC over millis..data (exclude magic)
+  // Compute CRC over millis + DID + len + data (NOT the magic)
   uint8_t crc = 0x00;
-  crc = crc8_ccitt_buf(msb, 4);
-  crc = crc8_ccitt_update(crc, didbe[0]);
-  crc = crc8_ccitt_update(crc, didbe[1]);
-  crc = crc8_ccitt_update(crc, len);
-  if (len) crc = crc8_ccitt_buf(data, len);
+  crc = crc8_ccitt_buf(crc, hdr, 4);         // millis (4 LE)
+  crc = crc8_ccitt_step(crc, hdr[4]);        // DID hi
+  crc = crc8_ccitt_step(crc, hdr[5]);        // DID lo
+  crc = crc8_ccitt_step(crc, hdr[6]);        // len
+  crc = crc8_ccitt_buf(crc, data, len);      // payload
 
-  Serial.write(&crc, 1);
+  // Write the frame bytes (no newlines, no prints)
+  Serial.write(0xAA);
+  Serial.write(0x55);
+  Serial.write(hdr, 7);
+  Serial.write(data, len);
+  Serial.write(crc);
 }
 
 // ===== Setup / Loop =====
@@ -377,7 +369,7 @@ void pollOne(uint16_t did, uint8_t* lastChkArr, uint8_t* lastLenArr, bool* logge
 
   // Always log the first time we successfully read this DID
   if (!loggedOnceArr[idx]) {
-    logLine(did, data, len);
+    sendFrame(did, data, len);
     loggedOnceArr[idx] = true;
     lastChkArr[idx] = chk; lastLenArr[idx] = len;
     return;
@@ -386,11 +378,11 @@ void pollOne(uint16_t did, uint8_t* lastChkArr, uint8_t* lastLenArr, bool* logge
 #if LOG_ONLY_ON_CHANGE
   bool changed = (chk != lastChkArr[idx]) || (len != lastLenArr[idx]);
   if (changed) {
-    logLine(did, data, len);
+    sendFrame(did, data, len);
     lastChkArr[idx] = chk; lastLenArr[idx] = len;
   }
 #else
-  logLine(did, data, len);
+  sendFrame(did, data, len);
   lastChkArr[idx] = chk; lastLenArr[idx] = len;
 #endif
 }
