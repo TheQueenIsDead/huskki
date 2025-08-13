@@ -76,7 +76,7 @@ func main() {
 	eventHub := hub.NewHub()
 
 	var rawW *bufio.Writer
-	f, err := os.OpenFile("/home/kees/rawlog", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	f, err := os.OpenFile("/Users/keestucker/go/src/github.com/huskki/logs/rawlog", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		log.Fatalf("open rawlog: %v", err)
 	}
@@ -229,7 +229,7 @@ func readBinary(r io.Reader, eventHub *hub.EventHub, raw *bufio.Writer) {
 		crc = crc8Update(crc, hdr[6])       // len
 		crc = crc8UpdateBuf(crc, data)      // payload
 		if crc != crcRx {
-			continue // drop bad frame
+			//continue // drop bad frame
 		}
 
 		// ---- SAVE the exact validated frame (magic .. crc) ----
