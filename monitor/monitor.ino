@@ -34,8 +34,8 @@ static const uint32_t CAN_ID_RSP = 0x7E8;
 #define SA_L3_SendKey                  0x06
 
 const unsigned long TESTER_PRESENT_PERIOD_MS = 2000;
-const unsigned long FAST_GAP_MS  = 5;   // between FAST polls
-const unsigned long SLOW_GAP_MS  = 10;  // between SLOW polls (full list)
+const unsigned long FAST_GAP_MS  = 10;   // between FAST polls
+const unsigned long SLOW_GAP_MS  = 20;  // between SLOW polls (full list)
 
 #define MIN(a,b) ((a)<(b)?(a):(b))
 
@@ -48,6 +48,16 @@ const uint16_t FAST_DIDS[] PROGMEM = {
   0x0001, // Throttle? (0..255)
   0x0031, // Gear enum
   0x0064, // Switch (second byte toggles)
+  0x0110, // Injection Time Cyl #1
+  0x0012, // O2 Voltage Rear
+  0x0042, // Side stand
+  0x0003, // IAP Cyl #1
+  0x0041, // Clutch
+  0x0102, // O2 compensation #1
+  0x0108, // Ignition Cyl #1 Coil #2
+  0x0132, // Dwell time Cyl #1 Coil #2
+  0x0002, // IAP Cyl #1 Voltage
+  0x0130, // Dwell time Cyl #1 Coil #1
 };
 const size_t FAST_COUNT = sizeof(FAST_DIDS)/sizeof(FAST_DIDS[0]);
 
@@ -282,17 +292,54 @@ void printHexPayload(const uint8_t* data, uint16_t len) {
   }
 }
 
-void logLine(uint16_t did, const uint8_t* data, uint16_t len) {
-  Serial.print(millis());
-  Serial.print(',');
-  Serial.print("0x");
-  if (did < 0x1000) Serial.print('0'); // zero-pad width 4
-  if (did < 0x0100) Serial.print('0');
-  if (did < 0x0010) Serial.print('0');
-  Serial.print(did, HEX);
-  Serial.print(',');
-  printHexPayload(data, len);
-  Serial.println();
+// --- CRC-8-CCITT (poly 0x07), init 0x00
+static inline uint8_t crc8_ccitt_update(uint8_t crc, uint8_t b) {
+  crc ^= b;
+  for (uint8_t i = 0; i < 8; i++) {
+    crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0x07) : (uint8_t)(crc << 1);
+  }
+  return crc;
+}
+
+static uint8_t crc8_ccitt_buf(const uint8_t* p, size_t n) {
+  uint8_t crc = 0x00;
+  while (n--) crc = crc8_ccitt_update(crc, *p++);
+  return crc;
+}
+
+// Write one binary record: magic, millis, DID, len, data, crc
+void logLine(uint16_t did, const uint8_t* data, uint8_t len) {
+  // Magic for resync
+  const uint8_t magic[2] = { 0xAA, 0x55 };
+  Serial.write(magic, 2);
+
+  // millis (LE)
+  uint32_t ms = millis();
+  uint8_t msb[4] = {
+    (uint8_t)(ms >> 0),
+    (uint8_t)(ms >> 8),
+    (uint8_t)(ms >> 16),
+    (uint8_t)(ms >> 24)
+  };
+  Serial.write(msb, 4);
+
+  // DID (BE / network order)
+  uint8_t didbe[2] = { (uint8_t)(did >> 8), (uint8_t)(did & 0xFF) };
+  Serial.write(didbe, 2);
+
+  // payload length and payload
+  Serial.write(&len, 1);
+  if (len) Serial.write(data, len);
+
+  // CRC over millis..data (exclude magic)
+  uint8_t crc = 0x00;
+  crc = crc8_ccitt_buf(msb, 4);
+  crc = crc8_ccitt_update(crc, didbe[0]);
+  crc = crc8_ccitt_update(crc, didbe[1]);
+  crc = crc8_ccitt_update(crc, len);
+  if (len) crc = crc8_ccitt_buf(data, len);
+
+  Serial.write(&crc, 1);
 }
 
 // ===== Setup / Loop =====
@@ -361,7 +408,7 @@ void loop() {
   }
 
   // SLOW round-robin (skip DIDs that are in FAST to avoid duplicate logs)
-  /*if (now - lastSlowReq >= SLOW_GAP_MS) {
+  if (now - lastSlowReq >= SLOW_GAP_MS) {
     uint16_t did; memcpy_P(&did, &DID_LIST[slowIndex], sizeof(uint16_t));
     size_t dummy;
     if (!isFastDid(did, &dummy)) {
@@ -369,5 +416,5 @@ void loop() {
     }
     slowIndex = (slowIndex + 1) % DID_COUNT;
     lastSlowReq = now;
-  }*/
+  }
 }

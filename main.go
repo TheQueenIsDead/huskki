@@ -2,18 +2,15 @@ package main
 
 import (
 	"bufio"
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"html/template"
 	"huskki/hub"
+	"io"
 	"log"
 	"math"
 	"net/http"
-	"os"
-	"strconv"
 	"strings"
-	"time"
 
 	ds "github.com/starfederation/datastar-go/datastar"
 	"go.bug.st/serial"
@@ -57,10 +54,7 @@ func main() {
 
 	eventHub := hub.NewHub()
 
-	// scan CSV lines from scanner
-	go func() {
-		scan(isReplay, replayFile, serialPort, eventHub)
-	}()
+	go readBinary(serialPort, eventHub)
 
 	dashTemplate, err := template.ParseGlob("*.gohtml")
 	if err != nil {
@@ -144,79 +138,92 @@ func autoSelectPort() (string, error) {
 	return "", fmt.Errorf("no serial ports found")
 }
 
-func scan(isReplay bool, replayFile *string, serialPort serial.Port, eventHub *hub.EventHub) {
-	var scanner *bufio.Scanner
+// readBinary consumes records with layout:
+// [AA 55][millis:u32 LE][DID:u16 BE][len:u8][data:len][crc8:u8]
+// CRC-8-CCITT over millis..data (excludes magic).
+func readBinary(r io.Reader, eventHub *hub.EventHub) {
+	br := bufio.NewReader(r)
 
-	if isReplay {
-		file, err := os.Open(*replayFile)
+	for {
+		// --- resync on magic ---
+		a, err := br.ReadByte()
 		if err != nil {
-			log.Fatal(err)
-		}
-		defer func(file *os.File) {
-			err := file.Close()
-			if err != nil {
-				log.Fatal(err)
+			if err != io.EOF {
+				log.Printf("read: %v", err)
 			}
-		}(file)
-		scanner = bufio.NewScanner(file)
-	} else {
-		scanner = bufio.NewScanner(serialPort)
+			return
+		}
+		if a != 0xAA {
+			continue
+		}
+		b, err := br.ReadByte()
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("read: %v", err)
+			}
+			return
+		}
+		if b != 0x55 {
+			continue
+		}
+
+		// --- header: ms(4 LE), did(2 BE), len(1) ---
+		hdr := make([]byte, 7)
+		if _, err := io.ReadFull(br, hdr); err != nil {
+			log.Printf("hdr: %v", err)
+			return
+		}
+
+		did := uint16(hdr[4])<<8 | uint16(hdr[5])
+		dl := int(hdr[6])
+		if dl < 0 || dl > 64 { // sanity
+			log.Printf("bad len %d, resync", dl)
+			continue
+		}
+
+		// --- payload + crc ---
+		payload := make([]byte, dl+1)
+		if _, err := io.ReadFull(br, payload); err != nil {
+			log.Printf("payload: %v", err)
+			return
+		}
+		data := payload[:dl]
+		crcRx := payload[dl]
+
+		// --- verify CRC ---
+		crc := crc8UpdateBuf(0x00, hdr[:4]) // millis
+		crc = crc8Update(crc, hdr[4])       // did hi
+		crc = crc8Update(crc, hdr[5])       // did lo
+		crc = crc8Update(crc, hdr[6])       // len
+		crc = crc8UpdateBuf(crc, data)      // data
+		if crc != crcRx {
+			// corrupt frame, drop and resync
+			continue
+		}
+
+		// hand off raw DID bytes to your existing parser
+		broadcastParsedSensorData(eventHub, uint64(did), data)
 	}
-
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
-
-	readScanner(scanner, eventHub, isReplay)
 }
 
-func readScanner(scanner *bufio.Scanner, eventHub *hub.EventHub, isReplay bool) {
-	start := time.Now()
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		fmt.Println(line)
-
-		// Parse lines; Expect; millis,DID,data_hex[,u16be]
-		parts := strings.SplitN(line, ",", 4)
-		if len(parts) < 3 {
-			continue
+// CRC-8-CCITT, poly 0x07, init 0x00 (matches Arduino writer)
+func crc8Update(crc, b byte) byte {
+	crc ^= b
+	for i := 0; i < 8; i++ {
+		if crc&0x80 != 0 {
+			crc = (crc << 1) ^ 0x07
+		} else {
+			crc <<= 1
 		}
-		timestamp, err := strconv.Atoi(parts[0])
-		if err != nil {
-			log.Printf("parse timestamp: %v", err)
-			continue
-		}
-		didStr := parts[1]
-		if !strings.HasPrefix(didStr, "0x") {
-			continue
-		}
-		didVal, err := strconv.ParseUint(didStr[2:], 16, 16)
-		if err != nil {
-			continue
-		}
-		dataHex := parts[2]
-		clean := strings.ReplaceAll(dataHex, " ", "")
-		if len(clean)%2 == 1 {
-			continue
-		}
-		dataBytes, err := hex.DecodeString(clean)
-		if err != nil || len(dataBytes) == 0 {
-			continue
-		}
-
-		// Replay timing
-		if isReplay {
-			elapsed := time.Now().Sub(start)
-			timeToWait := timestamp - int(elapsed.Milliseconds())
-			if timeToWait > 0 {
-				time.Sleep(time.Duration(timeToWait) * time.Millisecond)
-			}
-		}
-
-		broadcastParsedSensorData(eventHub, didVal, dataBytes)
 	}
-	if err := scanner.Err(); err != nil {
-		log.Printf("serial scanner error: %v", err)
+	return crc
+}
+
+func crc8UpdateBuf(crc byte, p []byte) byte {
+	for _, b := range p {
+		crc = crc8Update(crc, b)
 	}
+	return crc
 }
 
 func patch(req *http.Request, signalChan <-chan map[string]any, sse *ds.ServerSentEventGenerator) bool {
