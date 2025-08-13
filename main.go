@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	ds "github.com/starfederation/datastar-go/datastar"
 	"go.bug.st/serial"
@@ -58,48 +59,19 @@ type chartProps struct {
 	Data        []int
 }
 
-// tpsHistoryData contains all the data points of the throttle position history readings in order to display as a graph
-var tpsHistoryData []int
-
-// tpsHistoryLabels contains a timestamp (label) for each data point in history
-var tpsHistoryLabels []int
-
-// rpmHistoryData contains all the data points of the revolutions per minute readings in order to display as a graph
-var rpmHistoryData []int
-
-// rpmHistoryLabels contains a timestamp (label) for each data point in history
-var rpmHistoryLabels []int
-
 var Templates *template.Template
-
-func buildUpdateChartScript(name string, label, data int) string {
-	return fmt.Sprintf(`(function(){
-		let chart = Chart.getChart("%s-chart");
-		chart.data.labels.push('%d');
-		chart.data.datasets.forEach((dataset) => {
-			dataset.data.push('%d');
-		});
-		chart.update();
-	})()`, strings.ToLower(name), label, data)
-}
 
 var writeEvery = 100 // optional: set >0 to flush every N frames
 
 func main() {
-	port, baud, addr, replayFile := getFlags()
+	port, baud, addr := getFlags()
 
-	isReplay := *replayFile != ""
-
-	var serialPort serial.Port
-	var err error
-	if !isReplay {
-		serialPort, err = getArduinoPort(port, baud, serialPort, err)
-		defer func() {
-			if err := serialPort.Close(); err != nil {
-				log.Printf("close serial: %v", err)
-			}
-		}()
-	}
+	serialPort, err := getArduinoPort(port, baud)
+	defer func() {
+		if err := serialPort.Close(); err != nil {
+			log.Printf("close serial: %v", err)
+		}
+	}()
 
 	eventHub := hub.NewHub()
 
@@ -128,18 +100,6 @@ func main() {
 	handler.HandleFunc("/", func(writer http.ResponseWriter, req *http.Request) {
 		err := Templates.ExecuteTemplate(writer, "index", map[string]interface{}{
 			"cards": cards,
-			"tpsChartProps": chartProps{
-				Name:        "TPS",
-				Description: "Throttle Position Sensor",
-				Labels:      tpsHistoryLabels,
-				Data:        tpsHistoryData,
-			},
-			"rpmChartProps": chartProps{
-				Name:        "RPM",
-				Description: "Revolutions Per Minute",
-				Labels:      rpmHistoryLabels,
-				Data:        rpmHistoryData,
-			},
 		})
 		if err != nil {
 			log.Fatal(err)
@@ -164,16 +124,15 @@ func main() {
 	log.Fatal(http.ListenAndServe(*addr, handler))
 }
 
-func getFlags() (*string, *int, *string, *string) {
+func getFlags() (*string, *int, *string) {
 	port := flag.String("port", "auto", "serial device path or 'auto'")
 	baud := flag.Int("baud", DEFAULT_BAUD_RATE, "baud rate")
 	addr := flag.String("addr", ":8080", "http listen address")
-	replayFile := flag.String("replay", "", "path to replay file (csv log)")
 	flag.Parse()
-	return port, baud, addr, replayFile
+	return port, baud, addr
 }
 
-func getArduinoPort(port *string, baud *int, serialPort serial.Port, err error) (serial.Port, error) {
+func getArduinoPort(port *string, baud *int) (serial.Port, error) {
 	// auto-select Arduino-ish port if requested
 	if *port == "auto" {
 		name, err := autoSelectPort()
@@ -183,7 +142,7 @@ func getArduinoPort(port *string, baud *int, serialPort serial.Port, err error) 
 		*port = name
 	}
 	mode := &serial.Mode{BaudRate: *baud}
-	serialPort, err = serial.Open(*port, mode)
+	serialPort, err := serial.Open(*port, mode)
 	if err != nil {
 		log.Fatalf("open serial %s: %v", *port, err)
 	}
@@ -226,7 +185,7 @@ func readBinary(r io.Reader, eventHub *hub.EventHub, raw *bufio.Writer) {
 			if err != io.EOF {
 				log.Printf("read: %v", err)
 			}
-			return
+			continue
 		}
 		if a != 0xAA {
 			continue
@@ -236,7 +195,7 @@ func readBinary(r io.Reader, eventHub *hub.EventHub, raw *bufio.Writer) {
 			if err != io.EOF {
 				log.Printf("read: %v", err)
 			}
-			return
+			continue
 		}
 		if b != 0x55 {
 			continue
@@ -246,7 +205,7 @@ func readBinary(r io.Reader, eventHub *hub.EventHub, raw *bufio.Writer) {
 		hdr := make([]byte, 7)
 		if _, err := io.ReadFull(br, hdr); err != nil {
 			log.Printf("hdr: %v", err)
-			return
+			continue
 		}
 		did := uint16(hdr[4])<<8 | uint16(hdr[5])
 		dl := int(hdr[6])
@@ -258,7 +217,7 @@ func readBinary(r io.Reader, eventHub *hub.EventHub, raw *bufio.Writer) {
 		tail := make([]byte, dl+1)
 		if _, err := io.ReadFull(br, tail); err != nil {
 			log.Printf("payload: %v", err)
-			return
+			continue
 		}
 		data := tail[:dl]
 		crcRx := tail[dl]
@@ -292,7 +251,7 @@ func readBinary(r io.Reader, eventHub *hub.EventHub, raw *bufio.Writer) {
 		}
 
 		// hand off parsed bytes
-		broadcastParsedSensorData(eventHub, uint64(did), data)
+		broadcastParsedSensorData(eventHub, uint64(did), data, int(time.Now().UnixMilli()))
 	}
 }
 
@@ -326,7 +285,6 @@ func patch(req *http.Request, signalChan <-chan map[string]any, sse *ds.ServerSe
 		var writer = strings.Builder{}
 		if v, ok := signal["rpm"]; ok {
 			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "RPM", Value: v})
-			_ = sse.ExecuteScript(buildUpdateChartScript("RPM", int(time.Now().UnixMilli()), v.(int))) // FIXME: Bad practice to cast like this
 		}
 		if v, ok := signal["throttle"]; ok {
 			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "Throttle", Value: v})
@@ -336,7 +294,6 @@ func patch(req *http.Request, signalChan <-chan map[string]any, sse *ds.ServerSe
 		}
 		if v, ok := signal["tps"]; ok {
 			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "TPS", Value: v})
-			_ = sse.ExecuteScript(buildUpdateChartScript("TPS", int(time.Now().UnixMilli()), v.(int))) // FIXME: Bad practice to cast like this
 		}
 		if v, ok := signal["coolant"]; ok {
 			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "Coolant", Value: v})
@@ -355,8 +312,6 @@ func broadcastParsedSensorData(eventHub *hub.EventHub, didVal uint64, dataBytes 
 			raw := int(dataBytes[0])<<8 | int(dataBytes[1])
 			rpm := raw / 4
 			eventHub.Broadcast(map[string]any{"rpm": rpm})
-			rpmHistoryLabels = append(rpmHistoryLabels, timestamp)
-			rpmHistoryData = append(rpmHistoryData, rpm)
 		}
 
 	case THROTTLE_DID: // Throttle: (0..255?) no fucking clue what this is smoking, I think this is computed target throttle?
@@ -381,8 +336,6 @@ func broadcastParsedSensorData(eventHub *hub.EventHub, didVal uint64, dataBytes 
 			}
 			pct := (raw*100 + 511) / 1023 // integer rounding
 			eventHub.Broadcast(map[string]any{"tps": pct})
-			tpsHistoryLabels = append(tpsHistoryLabels, timestamp)
-			tpsHistoryData = append(tpsHistoryData, pct)
 		}
 
 	case COOLANT_DID: // Coolant °C
