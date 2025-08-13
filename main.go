@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	_ "embed"
 	"flag"
 	"fmt"
 	"html/template"
@@ -37,6 +38,9 @@ var preferredVIDs = map[string]bool{
 	"10C4": true, // CP210x
 	"0403": true, // FTDI
 }
+
+//go:embed static/datastar.js
+var datastarJS []byte
 
 type cardProps struct {
 	Name  string
@@ -118,6 +122,11 @@ func main() {
 				return
 			}
 		}
+	})
+
+	http.HandleFunc("/datastar.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		w.Write(datastarJS)
 	})
 
 	log.Printf("Listening on %s …", *addr)
