@@ -124,7 +124,7 @@ func main() {
 		}
 	})
 
-	http.HandleFunc("/datastar.js", func(w http.ResponseWriter, r *http.Request) {
+	handler.HandleFunc("/datastar.js", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/javascript")
 		w.Write(datastarJS)
 	})
