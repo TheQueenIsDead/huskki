@@ -10,6 +10,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"os"
 	"strings"
 
 	ds "github.com/starfederation/datastar-go/datastar"
@@ -36,6 +37,8 @@ var preferredVIDs = map[string]bool{
 	"0403": true, // FTDI
 }
 
+var writeEvery = 100 // optional: set >0 to flush every N frames
+
 func main() {
 	port, baud, addr, replayFile := getFlags()
 
@@ -54,7 +57,15 @@ func main() {
 
 	eventHub := hub.NewHub()
 
-	go readBinary(serialPort, eventHub)
+	var rawW *bufio.Writer
+	f, err := os.OpenFile("/home/kees/rawlog", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		log.Fatalf("open rawlog: %v", err)
+	}
+	defer f.Close()
+	rawW = bufio.NewWriterSize(f, 1<<20) // 1MB buffer
+	defer rawW.Flush()
+	go readBinary(serialPort, eventHub, rawW)
 
 	dashTemplate, err := template.ParseGlob("*.gohtml")
 	if err != nil {
@@ -140,12 +151,12 @@ func autoSelectPort() (string, error) {
 
 // readBinary consumes records with layout:
 // [AA 55][millis:u32 LE][DID:u16 BE][len:u8][data:len][crc8:u8]
-// CRC-8-CCITT over millis..data (excludes magic).
-func readBinary(r io.Reader, eventHub *hub.EventHub) {
+func readBinary(r io.Reader, eventHub *hub.EventHub, raw *bufio.Writer) {
 	br := bufio.NewReader(r)
+	frames := 0
 
 	for {
-		// --- resync on magic ---
+		// resync on magic
 		a, err := br.ReadByte()
 		if err != nil {
 			if err != io.EOF {
@@ -167,46 +178,61 @@ func readBinary(r io.Reader, eventHub *hub.EventHub) {
 			continue
 		}
 
-		// --- header: ms(4 LE), did(2 BE), len(1) ---
+		// header
 		hdr := make([]byte, 7)
 		if _, err := io.ReadFull(br, hdr); err != nil {
 			log.Printf("hdr: %v", err)
 			return
 		}
-
 		did := uint16(hdr[4])<<8 | uint16(hdr[5])
 		dl := int(hdr[6])
-		if dl < 0 || dl > 64 { // sanity
-			log.Printf("bad len %d, resync", dl)
+		if dl < 0 || dl > 64 {
 			continue
 		}
 
-		// --- payload + crc ---
-		payload := make([]byte, dl+1)
-		if _, err := io.ReadFull(br, payload); err != nil {
+		// payload + crc
+		tail := make([]byte, dl+1)
+		if _, err := io.ReadFull(br, tail); err != nil {
 			log.Printf("payload: %v", err)
 			return
 		}
-		data := payload[:dl]
-		crcRx := payload[dl]
+		data := tail[:dl]
+		crcRx := tail[dl]
 
-		// --- verify CRC ---
+		// verify CRC
 		crc := crc8UpdateBuf(0x00, hdr[:4]) // millis
 		crc = crc8Update(crc, hdr[4])       // did hi
 		crc = crc8Update(crc, hdr[5])       // did lo
 		crc = crc8Update(crc, hdr[6])       // len
-		crc = crc8UpdateBuf(crc, data)      // data
+		crc = crc8UpdateBuf(crc, data)      // payload
 		if crc != crcRx {
-			// corrupt frame, drop and resync
-			continue
+			continue // drop bad frame
 		}
 
-		// hand off raw DID bytes to your existing parser
+		// ---- SAVE the exact validated frame (magic .. crc) ----
+		if raw != nil {
+			// Build one contiguous record and append
+			rec := make([]byte, 2+7+dl+1)
+			rec[0], rec[1] = 0xAA, 0x55
+			copy(rec[2:9], hdr)     // millis(4) + did(2) + len(1)
+			copy(rec[9:9+dl], data) // payload
+			rec[9+dl] = crcRx       // crc
+			if _, err := raw.Write(rec); err != nil {
+				log.Printf("raw write: %v", err)
+			} else {
+				frames++
+				if writeEvery > 0 && (frames%writeEvery) == 0 {
+					_ = raw.Flush()
+				}
+			}
+		}
+
+		// hand off parsed bytes
 		broadcastParsedSensorData(eventHub, uint64(did), data)
 	}
 }
 
-// CRC-8-CCITT, poly 0x07, init 0x00 (matches Arduino writer)
+// CRC-8-CCITT helpers (poly 0x07, init 0x00)
 func crc8Update(crc, b byte) byte {
 	crc ^= b
 	for i := 0; i < 8; i++ {
@@ -218,7 +244,6 @@ func crc8Update(crc, b byte) byte {
 	}
 	return crc
 }
-
 func crc8UpdateBuf(crc byte, p []byte) byte {
 	for _, b := range p {
 		crc = crc8Update(crc, b)
