@@ -9,12 +9,12 @@
     new Chart(document.getElementById("{{ .Name | ToLower }}-chart"), {
         type: "line",
         data: {
-            labels: {{ .Labels }},
             datasets: [
                 {
                     label: '{{ .Description }}',
                     data: {{ .Data }},
-                    fill: false
+                    fill: false,
+                    parsing: false,
                 }
             ]
         },
@@ -24,7 +24,6 @@
                 x: {
                     type: 'time',
                     time: {
-                        parse: 'x',
                         unit: 'millisecond',
                         displayFormats: {
                             second: 'h:mm:ss a',
@@ -33,15 +32,13 @@
                     ticks: {
                         source: 'auto'
                     },
-                    // type: 'logarithmic',
-                    // bounds: 'ticks'
-
                 }
-            //     y: {
-            //         beginAtZero: true
-            //     }
             }
         }
     });
+    chartUpdateTimer = setInterval(() => {
+        Chart.getChart("{{ .Name | ToLower }}-chart").update('none');
+    }, 100); // update every 100ms
+
 </script>
 {{ end }}

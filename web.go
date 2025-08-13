@@ -24,26 +24,23 @@ var cards = []cardProps{
 type chartProps struct {
 	Name        string
 	Description string
-	Labels      []int
-	Data        []int
+	Data        []GraphData
 }
 
 var charts = []chartProps{
-	{"TPS", "Throotle", nil, nil},
-	{"RPM", "Revvie wevvy", nil, nil},
+	{"TPS", "Throotle", nil},
+	{"RPM", "Revvie wevvy", nil},
 }
 
 func buildUpdateChartScript(name string, label, data int) string {
 	return fmt.Sprintf(`(function(){
 		let chart = Chart.getChart("%s-chart");
-		chart.data.labels.push(%d);
-		chart.data.datasets[0].data.push(%d);
+		chart.data.datasets[0].data.push({x: %d, y: %d});
 
-		if (chart.data.labels.length > 20) {
-			chart.data.labels.shift();
-			chart.data.datasets[0].data.shift();
+
+		if (chart.data.datasets[0].length > 50) {
+			chart.data.datasets[0].shift();
 		}
-		chart.update();
 	})()`, strings.ToLower(name), label, data)
 }
 
@@ -53,14 +50,12 @@ func IndexHandler(w http.ResponseWriter, _ *http.Request) {
 		"tpsChartProps": chartProps{
 			Name:        "TPS",
 			Description: "Throttle Position Sensor",
-			Labels:      tpsHistoryLabels,
-			Data:        tpsHistoryData,
+			Data:        tpsHistory,
 		},
 		"rpmChartProps": chartProps{
 			Name:        "RPM",
 			Description: "Revolutions Per Minute",
-			Labels:      rpmHistoryLabels,
-			Data:        rpmHistoryData,
+			Data:        rpmHistory,
 		},
 	})
 	if err != nil {

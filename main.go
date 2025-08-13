@@ -39,15 +39,16 @@ var preferredVIDs = map[string]bool{
 	"0403": true, // FTDI
 }
 
+type GraphData struct {
+	X int
+	Y int
+}
+
 var (
 	// tpsHistoryData contains all the data points of the throttle position history readings in order to display as a graph
-	tpsHistoryData []int
-	// tpsHistoryLabels contains a timestamp (label) for each data point in history
-	tpsHistoryLabels []int
+	tpsHistory []GraphData
 	// rpmHistoryData contains all the data points of the revolutions per minute readings in order to display as a graph
-	rpmHistoryData []int
-	// rpmHistoryLabels contains a timestamp (label) for each data point in history
-	rpmHistoryLabels []int
+	rpmHistory []GraphData
 
 	// Globals
 	Templates *template.Template
@@ -253,7 +254,6 @@ func generatePatch(event map[string]any) func(*ds.ServerSentEventGenerator) erro
 		}
 
 		funcs = append(funcs, func(sse *ds.ServerSentEventGenerator) error {
-			// FIXME: Bad practice to cast like this
 			err := sse.ExecuteScript(buildUpdateChartScript(chart.Name, ts, v))
 			return err
 		})
@@ -288,8 +288,7 @@ func broadcastParsedSensorData(eventHub *hub.EventHub, didVal uint64, dataBytes 
 			raw := int(dataBytes[0])<<8 | int(dataBytes[1])
 			rpm := raw / 4
 			eventHub.Broadcast(map[string]any{"rpm": rpm, "timestamp": timestamp})
-			rpmHistoryLabels = append(rpmHistoryLabels, timestamp)
-			rpmHistoryData = append(rpmHistoryData, rpm)
+			rpmHistory = append(rpmHistory, GraphData{timestamp, rpm})
 		}
 
 	case THROTTLE_DID: // Throttle: (0..255?) no fucking clue what this is smoking, I think this is computed target throttle?
@@ -314,8 +313,7 @@ func broadcastParsedSensorData(eventHub *hub.EventHub, didVal uint64, dataBytes 
 			}
 			pct := (raw*100 + 511) / 1023 // integer rounding
 			eventHub.Broadcast(map[string]any{"tps": pct, "timestamp": timestamp})
-			tpsHistoryLabels = append(tpsHistoryLabels, timestamp)
-			tpsHistoryData = append(tpsHistoryData, pct)
+			tpsHistory = append(tpsHistory, GraphData{timestamp, pct})
 		}
 
 	case COOLANT_DID: // Coolant °C
