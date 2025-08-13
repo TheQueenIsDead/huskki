@@ -4,7 +4,6 @@ import (
 	"fmt"
 	ds "github.com/starfederation/datastar-go/datastar"
 	"net/http"
-	"strings"
 )
 
 type cardProps struct {
@@ -32,16 +31,8 @@ var charts = []chartProps{
 	{"RPM", "Revvie wevvy", nil},
 }
 
-func buildUpdateChartScript(name string, label, data int) string {
-	return fmt.Sprintf(`(function(){
-		let chart = Chart.getChart("%s-chart");
-		chart.data.datasets[0].data.push({x: %d, y: %d});
-
-
-		if (chart.data.datasets[0].length > 50) {
-			chart.data.datasets[0].shift();
-		}
-	})()`, strings.ToLower(name), label, data)
+func buildUpdateChartScript(chartName string, x, y int) string {
+	return fmt.Sprintf(`pushData(%s, %d, %d);`, fmt.Sprintf("%sBuffer", chartName), x, y)
 }
 
 func IndexHandler(w http.ResponseWriter, _ *http.Request) {

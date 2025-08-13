@@ -19,26 +19,40 @@
             ]
         },
         options: {
-            animation: false,
+            animation: {
+                duration: 0,
+                hover: { animationDuration: 0 },
+                responsiveAnimationDuration: 0
+            },
             scales: {
                 x: {
-                    type: 'time',
-                    time: {
-                        unit: 'millisecond',
-                        displayFormats: {
-                            second: 'h:mm:ss a',
+                    type: 'realtime',
+                    realtime: {
+                        duration: 30000,
+                        refresh: 250,
+                        delay: 1000,
+                        frameRate: 15,
+                        onRefresh: chart => {
+                            chart.data.datasets[0].data.push({
+                                x: Date.now(),
+                                y: Math.random()
+                            });
                         }
-                    },
-                    ticks: {
-                        source: 'auto'
-                    },
+                    }
                 }
             }
         }
     });
-    chartUpdateTimer = setInterval(() => {
-        Chart.getChart("{{ .Name | ToLower }}-chart").update('none');
-    }, 100); // update every 100ms
+
+    window['{{ .Name }}Buffer'] = [];
+    function pushData(name, x, y) {
+        window[name].push({ x, y });
+    }
+
+
+    {{/*chartUpdateTimer = setInterval(() => {*/}}
+    {{/*    Chart.getChart("{{ .Name | ToLower }}-chart").update('none');*/}}
+    {{/*}, 100); // update every 100ms*/}}
 
 </script>
 {{ end }}
