@@ -4,6 +4,7 @@ import (
 	"fmt"
 	ds "github.com/starfederation/datastar-go/datastar"
 	"net/http"
+	"strings"
 )
 
 type cardProps struct {
@@ -31,8 +32,12 @@ var charts = []chartProps{
 	{"RPM", "Revvie wevvy", nil},
 }
 
-func buildUpdateChartScript(chartName string, x, y int) string {
-	return fmt.Sprintf(`pushData(%s, %d, %d);`, fmt.Sprintf("%sBuffer", chartName), x, y)
+func buildUpdateChartScript(name string, x, y int) string {
+	return fmt.Sprintf(`pushData("%sBuffer", %d, %d);`,
+		strings.ToLower(name),
+		x, // should already be ms since epoch
+		y,
+	)
 }
 
 func IndexHandler(w http.ResponseWriter, _ *http.Request) {

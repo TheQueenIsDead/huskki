@@ -5,6 +5,16 @@
     <canvas id="{{ .Name | ToLower }}-chart" style="min-height: 250px"></canvas>
 </div>
 <script>
+    // Set the “zero” point for the chart timeline
+    window['{{ .Name | ToLower }}StartTime'] = Date.now();
+    // Each chart has its own data buffer
+    window['{{ .Name | ToLower }}Buffer'] = [];
+    // Generic push function using ms offsets from start
+    function pushData(bufferName, msOffset, y) {
+        if (!window[bufferName]) window[bufferName] = [];
+        const startTime = window['{{ .Name | ToLower }}StartTime'];
+        window[bufferName].push({ x: startTime + msOffset, y });
+    }
 
     new Chart(document.getElementById("{{ .Name | ToLower }}-chart"), {
         type: "line",
@@ -12,47 +22,42 @@
             datasets: [
                 {
                     label: '{{ .Description }}',
-                    data: {{ .Data }},
+                    data: [],
                     fill: false,
                     parsing: false,
                 }
             ]
         },
         options: {
-            animation: {
-                duration: 0,
-                hover: { animationDuration: 0 },
-                responsiveAnimationDuration: 0
-            },
+            // animation: false,
+            // animation: {
+            //     duration: 0,
+            //     hover: { animationDuration: 0 },
+            //     responsiveAnimationDuration: 0
+            // },
             scales: {
                 x: {
                     type: 'realtime',
                     realtime: {
                         duration: 30000,
-                        refresh: 250,
-                        delay: 1000,
-                        frameRate: 15,
+                        refresh: 10,
+                        delay: -50,
+                        frameRate: 60,
+                        // Atttempt to set the current time to the future
+                        // in order to allow for padding on the right side of the chart
+                        time: { now: () => Date.now() + 10000 },
                         onRefresh: chart => {
-                            chart.data.datasets[0].data.push({
-                                x: Date.now(),
-                                y: Math.random()
-                            });
+                            const bufferName = '{{ .Name | ToLower }}Buffer';
+                            const buff = window[bufferName] || [];
+                            while (buff.length) {
+                                let data = buff.shift()
+                                chart.data.datasets[0].data.push(data);
+                            }
                         }
                     }
                 }
             }
         }
     });
-
-    window['{{ .Name }}Buffer'] = [];
-    function pushData(name, x, y) {
-        window[name].push({ x, y });
-    }
-
-
-    {{/*chartUpdateTimer = setInterval(() => {*/}}
-    {{/*    Chart.getChart("{{ .Name | ToLower }}-chart").update('none');*/}}
-    {{/*}, 100); // update every 100ms*/}}
-
 </script>
 {{ end }}
