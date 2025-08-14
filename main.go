@@ -49,13 +49,6 @@ var (
 	EventHub  *hub.EventHub
 )
 
-var (
-	// tpsHistoryData contains all the data points of the throttle position history readings in order to display as a graph
-	tpsHistory []GraphData
-	// rpmHistoryData contains all the data points of the revolutions per minute readings in order to display as a graph
-	rpmHistory []GraphData
-)
-
 func main() {
 	port, baud, addr, replayFile := getFlags()
 
@@ -227,7 +220,6 @@ func broadcastParsedSensorData(eventHub *hub.EventHub, didVal uint64, dataBytes 
 			raw := int(dataBytes[0])<<8 | int(dataBytes[1])
 			rpm := raw / 4
 			eventHub.Broadcast(map[string]any{"rpm": rpm, "timestamp": timestamp})
-			rpmHistory = append(rpmHistory, GraphData{timestamp, rpm})
 		}
 
 	case THROTTLE_DID: // Throttle: (0..255?) no fucking clue what this is smoking, I think this is computed target throttle?
@@ -252,7 +244,6 @@ func broadcastParsedSensorData(eventHub *hub.EventHub, didVal uint64, dataBytes 
 			}
 			pct := (raw*100 + 511) / 1023 // integer rounding
 			eventHub.Broadcast(map[string]any{"tps": pct, "timestamp": timestamp})
-			tpsHistory = append(tpsHistory, GraphData{timestamp, pct})
 		}
 
 	case COOLANT_DID: // Coolant °C

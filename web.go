@@ -28,12 +28,11 @@ var cards = []cardProps{
 type chartProps struct {
 	Name        string
 	Description string
-	Data        []GraphData
 }
 
 var charts = []chartProps{
-	{"TPS", "Throttle", nil},
-	{"RPM", "Revolutions Per Minute", nil},
+	{"TPS", "Throttle"},
+	{"RPM", "Revolutions Per Minute"},
 }
 
 // IndexHandler is the main entrypoint for the UI
@@ -44,12 +43,10 @@ func IndexHandler(w http.ResponseWriter, _ *http.Request) {
 		"tpsChartProps": chartProps{
 			Name:        "TPS",
 			Description: "Throttle Position Sensor",
-			Data:        tpsHistory,
 		},
 		"rpmChartProps": chartProps{
 			Name:        "RPM",
 			Description: "Revolutions Per Minute",
-			Data:        rpmHistory,
 		},
 	})
 	if err != nil {
