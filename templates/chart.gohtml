@@ -9,12 +9,6 @@
     window['{{ .Name | ToLower }}StartTime'] = Date.now();
     // Each chart has its own data buffer
     window['{{ .Name | ToLower }}Buffer'] = [];
-    // Generic push function using ms offsets from start
-    function pushData(bufferName, msOffset, y) {
-        if (!window[bufferName]) window[bufferName] = [];
-        const startTime = window['{{ .Name | ToLower }}StartTime'];
-        window[bufferName].push({ x: startTime + msOffset, y });
-    }
 
     new Chart(document.getElementById("{{ .Name | ToLower }}-chart"), {
         type: "line",
@@ -23,8 +17,9 @@
                 {
                     label: '{{ .Description }}',
                     data: [],
-                    fill: false,
+                    fill: true,
                     parsing: false,
+                    pointRadius: 0,
                 }
             ]
         },
@@ -36,14 +31,17 @@
             //     responsiveAnimationDuration: 0
             // },
             scales: {
+                y: {
+                    beginAtZero: true,
+                },
                 x: {
                     type: 'realtime',
                     realtime: {
-                        duration: 30000,
+                        duration: 10000,
                         refresh: 10,
-                        delay: -50,
-                        frameRate: 60,
-                        // Atttempt to set the current time to the future
+                        delay: 0,
+                        frameRate: 30,
+                        // Attempt to set the current time to the future
                         // in order to allow for padding on the right side of the chart
                         time: { now: () => Date.now() + 10000 },
                         onRefresh: chart => {

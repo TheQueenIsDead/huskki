@@ -15,7 +15,6 @@ import (
 	"strings"
 	"time"
 
-	ds "github.com/starfederation/datastar-go/datastar"
 	"go.bug.st/serial"
 	"go.bug.st/serial/enumerator"
 )
@@ -44,15 +43,17 @@ type GraphData struct {
 	Y int
 }
 
+// Globals
+var (
+	Templates *template.Template
+	EventHub  *hub.EventHub
+)
+
 var (
 	// tpsHistoryData contains all the data points of the throttle position history readings in order to display as a graph
 	tpsHistory []GraphData
 	// rpmHistoryData contains all the data points of the revolutions per minute readings in order to display as a graph
 	rpmHistory []GraphData
-
-	// Globals
-	Templates *template.Template
-	EventHub  *hub.EventHub
 )
 
 func main() {
@@ -216,68 +217,6 @@ func readScanner(scanner *bufio.Scanner, eventHub *hub.EventHub, isReplay bool) 
 	}
 	if err := scanner.Err(); err != nil {
 		log.Printf("serial scanner error: %v", err)
-	}
-}
-
-// generatePatch takes an event received from the event queue, iterates the cards that are displayed on the UI,
-// and returns a closure that can be used to patch the client.
-func generatePatch(event map[string]any) func(*ds.ServerSentEventGenerator) error {
-
-	var writer = strings.Builder{}
-	var funcs []func(generator *ds.ServerSentEventGenerator) error
-
-	// For each card, see if we have an update and template a response
-	for _, card := range cards {
-		if value, ok := event[strings.ToLower(card.Name)]; ok {
-			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: card.Name, Value: fmt.Sprintf("%v", value)})
-		}
-	}
-
-	// For each chart see if we have an update and form an SSE update function
-	for _, chart := range charts {
-		value, ok := event[strings.ToLower(chart.Name)]
-		if !ok {
-			continue
-		}
-		timestamp, ok := event["timestamp"]
-		if !ok {
-			continue
-		}
-
-		v, ok := value.(int)
-		if !ok {
-			continue
-		}
-		ts, ok := timestamp.(int)
-		if !ok {
-			continue
-		}
-
-		funcs = append(funcs, func(sse *ds.ServerSentEventGenerator) error {
-			err := sse.ExecuteScript(buildUpdateChartScript(chart.Name, ts, v))
-			return err
-		})
-	}
-
-	// Main closure
-	return func(sse *ds.ServerSentEventGenerator) error {
-		// Patch UI elements
-		if writer.String() != "" {
-			err := sse.PatchElements(writer.String())
-			if err != nil {
-				return err
-			}
-		}
-
-		// Exec client-side javascript
-		for _, f := range funcs {
-			err := f(sse)
-			if err != nil {
-				return err
-			}
-		}
-
-		return nil
 	}
 }
 

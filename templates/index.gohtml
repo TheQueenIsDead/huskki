@@ -19,6 +19,15 @@
     </style>
 </head>
 <body>
+<script>
+// Allows data to be pushed into a local buffer on the page for storing timeseries
+// data before it is consumed by a chart.
+function pushData(chart, msOffset, y) {
+    if (!window[chart + 'Buffer']) window[chart + 'Buffer'] = [];
+    const startTime = window[chart + 'StartTime'];
+    window[chart + 'Buffer'].push({ x: startTime + msOffset, y });
+}
+</script>
 <div data-on-load="@get('/events', {openWhenHidden: true})"></div>
 
 {{ range .cards }}
