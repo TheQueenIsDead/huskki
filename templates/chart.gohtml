@@ -5,29 +5,56 @@
     <canvas id="{{ .Name | ToLower }}-chart" style="min-height: 250px"></canvas>
 </div>
 <script>
+    // Set the “zero” point for the chart timeline
+    window['{{ .Name | ToLower }}StartTime'] = Date.now();
+    // Each chart has its own data buffer
+    window['{{ .Name | ToLower }}Buffer'] = [];
 
     new Chart(document.getElementById("{{ .Name | ToLower }}-chart"), {
         type: "line",
         data: {
-            labels: {{ .Labels }},
             datasets: [
                 {
                     label: '{{ .Description }}',
-                    data: {{ .Data }},
-                    fill: false
+                    data: [],
+                    fill: true,
+                    parsing: false,
+                    pointRadius: 0,
                 }
             ]
         },
         options: {
-            // TODO: Enable timeseries based X axis
-            // scales: {
-            //     // x: {
-            //     //     type: 'timeseries',
-            //     // },
-            //     y: {
-            //         beginAtZero: true
-            //     }
-            // }
+            // animation: false,
+            // animation: {
+            //     duration: 0,
+            //     hover: { animationDuration: 0 },
+            //     responsiveAnimationDuration: 0
+            // },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                },
+                x: {
+                    type: 'realtime',
+                    realtime: {
+                        duration: 10000,
+                        refresh: 10,
+                        delay: 0,
+                        frameRate: 30,
+                        // Attempt to set the current time to the future
+                        // in order to allow for padding on the right side of the chart
+                        time: { now: () => Date.now() + 10000 },
+                        onRefresh: chart => {
+                            const bufferName = '{{ .Name | ToLower }}Buffer';
+                            const buff = window[bufferName] || [];
+                            while (buff.length) {
+                                let data = buff.shift()
+                                chart.data.datasets[0].data.push(data);
+                            }
+                        }
+                    }
+                }
+            }
         }
     });
 </script>
