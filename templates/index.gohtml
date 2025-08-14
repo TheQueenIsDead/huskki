@@ -34,8 +34,11 @@ function pushData(chart, msOffset, y) {
     {{ template "card" . }}
 {{ end }}
 
-{{ template "chart" .tpsChartProps }}
-{{ template "chart" .rpmChartProps }}
+{{/* Charts can be disabled for performance reasons in web.go */}}
+{{ if .chartsEnabled }}
+    {{ template "chart" .tpsChartProps }}
+    {{ template "chart" .rpmChartProps }}
+{{ end }}
 </body>
 
 </html>

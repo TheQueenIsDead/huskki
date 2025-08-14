@@ -7,6 +7,10 @@ import (
 	"strings"
 )
 
+const (
+	DISABLE_CHARTS = false
+)
+
 type cardProps struct {
 	Name  string
 	Value any
@@ -35,7 +39,8 @@ var charts = []chartProps{
 // IndexHandler is the main entrypoint for the UI
 func IndexHandler(w http.ResponseWriter, _ *http.Request) {
 	err := Templates.ExecuteTemplate(w, "index", map[string]interface{}{
-		"cards": cards,
+		"cards":         cards,
+		"chartsEnabled": !DISABLE_CHARTS,
 		"tpsChartProps": chartProps{
 			Name:        "TPS",
 			Description: "Throttle Position Sensor",
@@ -97,6 +102,9 @@ func generatePatch(event map[string]any) func(*ds.ServerSentEventGenerator) erro
 
 	// For each chart see if we have an update and form an SSE update function
 	for _, chart := range charts {
+		if DISABLE_CHARTS {
+			continue
+		}
 		value, ok := event[strings.ToLower(chart.Name)]
 		if !ok {
 			continue
