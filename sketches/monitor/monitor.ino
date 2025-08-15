@@ -310,9 +310,9 @@ void sendFrame(uint16_t did, const uint8_t* data, uint8_t len) {
   // Compute CRC over millis + DID + len + data (NOT the magic)
   uint8_t crc = 0x00;
   crc = crc8_ccitt_buf(crc, hdr, 4);         // millis (4 LE)
-  crc = crc8_ccitt_step(crc, hdr[4]);        // DID hi
-  crc = crc8_ccitt_step(crc, hdr[5]);        // DID lo
-  crc = crc8_ccitt_step(crc, hdr[6]);        // len
+  crc = crc8_ccitt_update(crc, hdr[4]);        // DID hi
+  crc = crc8_ccitt_update(crc, hdr[5]);        // DID lo
+  crc = crc8_ccitt_update(crc, hdr[6]);        // len
   crc = crc8_ccitt_buf(crc, data, len);      // payload
 
   // Write the frame bytes (no newlines, no prints)
