@@ -12,6 +12,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,8 +21,13 @@ import (
 	"go.bug.st/serial/enumerator"
 )
 
-const DEFAULT_BAUD_RATE = 115200
+// Config
+const (
+	DEFAULT_BAUD_RATE = 115200
+	WRITE_EVERY_N_FRAMES = 100
+)
 
+// Known DIDs
 const (
 	RPM_DID      = 0x0100
 	THROTTLE_DID = 0x0001
@@ -29,6 +35,9 @@ const (
 	TPS_DID      = 0x0076
 	COOLANT_DID  = 0x0009
 )
+
+//go:embed static/datastar.js
+var datastarJS []byte
 
 // Arduino & clones common VIDs
 var preferredVIDs = map[string]bool{
@@ -39,46 +48,36 @@ var preferredVIDs = map[string]bool{
 	"0403": true, // FTDI
 }
 
-//go:embed static/datastar.js
-var datastarJS []byte
-
-type cardProps struct {
-	Name  string
-	Value any
-	Unit  string
+type GraphData struct {
+	X int
+	Y int
 }
 
-var cards = []cardProps{
-	{"Throttle", 0, "%"},
-	{"Grip", 0, "%"},
-	{"TPS", 0, "%"},
-	{"RPM", 0, "RPM"},
-	{"Coolant", 0, "°C"},
-}
-
-type chartProps struct {
-	Name        string
-	Description string
-	Labels      []int
-	Data        []int
-}
-
-var Templates *template.Template
-
-var writeEvery = 100 // optional: set >0 to flush every N frames
+// Globals
+var (
+	Templates *template.Template
+	EventHub  *hub.EventHub
+)
 
 func main() {
-	port, baud, addr := getFlags()
+	port, baud, addr, replayFile := getFlags()
 
-	serialPort, err := getArduinoPort(port, baud)
-	defer func() {
-		if err := serialPort.Close(); err != nil {
-			log.Printf("close serial: %v", err)
-		}
-	}()
+	isReplay := *replayFile != ""
 
-	eventHub := hub.NewHub()
+	var serialPort serial.Port
+	var err error
+	if !isReplay {
+		serialPort, err = getArduinoPort(port, baud, serialPort, err)
+		defer func() {
+			if err := serialPort.Close(); err != nil {
+				log.Printf("close serial: %v", err)
+			}
+		}()
+	}
 
+	EventHub = hub.NewHub()
+
+	// TODO, support replays
 	var rawW *bufio.Writer
 	f, err := os.OpenFile("/home/kees/rawlog", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
@@ -99,31 +98,10 @@ func main() {
 	}
 
 	handler := http.NewServeMux()
+	handler.HandleFunc("/", IndexHandler)
+	handler.HandleFunc("/events", EventsHandler)
 
-	// HTTP: index
-	handler.HandleFunc("/", func(writer http.ResponseWriter, req *http.Request) {
-		err := Templates.ExecuteTemplate(writer, "index", map[string]interface{}{
-			"cards": cards,
-		})
-		if err != nil {
-			log.Fatal(err)
-		}
-	})
-
-	// HTTP: SSE
-	handler.HandleFunc("/events", func(writer http.ResponseWriter, req *http.Request) {
-		sse := ds.NewSSE(writer, req)
-
-		_, ch, cancel := eventHub.Subscribe()
-		defer cancel()
-
-		for {
-			if patch(req, ch, sse) {
-				return
-			}
-		}
-	})
-
+	// TODO: extract to func
 	handler.HandleFunc("/datastar.js", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/javascript")
 		w.Write(datastarJS)
@@ -133,12 +111,13 @@ func main() {
 	log.Fatal(http.ListenAndServe(*addr, handler))
 }
 
-func getFlags() (*string, *int, *string) {
+func getFlags() (*string, *int, *string, *string) {
 	port := flag.String("port", "auto", "serial device path or 'auto'")
 	baud := flag.Int("baud", DEFAULT_BAUD_RATE, "baud rate")
 	addr := flag.String("addr", ":8080", "http listen address")
+	replayFile := flag.String("replay", "", "path to replay file (csv log)")
 	flag.Parse()
-	return port, baud, addr
+	return port, baud, addr, replayFile
 }
 
 func getArduinoPort(port *string, baud *int) (serial.Port, error) {
@@ -238,7 +217,7 @@ func readBinary(r io.Reader, eventHub *hub.EventHub, raw *bufio.Writer) {
 		crc = crc8Update(crc, hdr[6])       // len
 		crc = crc8UpdateBuf(crc, data)      // payload
 		if crc != crcRx {
-			//continue // drop bad frame
+			continue // drop bad frame
 		}
 
 		// ---- SAVE the exact validated frame (magic .. crc) ----
@@ -283,58 +262,27 @@ func crc8UpdateBuf(crc byte, p []byte) byte {
 	return crc
 }
 
-func patch(req *http.Request, signalChan <-chan map[string]any, sse *ds.ServerSentEventGenerator) bool {
-	select {
-	case <-req.Context().Done():
-		return true
-	case signal, ok := <-signalChan:
-		if !ok {
-			return true
-		}
-		var writer = strings.Builder{}
-		if v, ok := signal["rpm"]; ok {
-			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "RPM", Value: v})
-		}
-		if v, ok := signal["throttle"]; ok {
-			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "Throttle", Value: v})
-		}
-		if v, ok := signal["grip"]; ok {
-			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "Grip", Value: v})
-		}
-		if v, ok := signal["tps"]; ok {
-			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "TPS", Value: v})
-		}
-		if v, ok := signal["coolant"]; ok {
-			Templates.ExecuteTemplate(&writer, "card.value", cardProps{Name: "Coolant", Value: v})
-		}
-		if writer.Len() > 0 {
-			_ = sse.PatchElements(writer.String())
-		}
-	}
-	return false
-}
-
 func broadcastParsedSensorData(eventHub *hub.EventHub, didVal uint64, dataBytes []byte, timestamp int) {
 	switch uint16(didVal) {
 	case RPM_DID: // RPM = u16be / 4
 		if len(dataBytes) >= 2 {
 			raw := int(dataBytes[0])<<8 | int(dataBytes[1])
 			rpm := raw / 4
-			eventHub.Broadcast(map[string]any{"rpm": rpm})
+			eventHub.Broadcast(map[string]any{"rpm": rpm, "timestamp": timestamp})
 		}
 
 	case THROTTLE_DID: // Throttle: (0..255?) no fucking clue what this is smoking, I think this is computed target throttle?
 		if len(dataBytes) >= 1 {
 			raw8 := int(dataBytes[len(dataBytes)-1])
 			//pct := scalePct(raw8, 3, 17) // -> 0..100%
-			eventHub.Broadcast(map[string]any{"throttle": raw8})
+			eventHub.Broadcast(map[string]any{"throttle": raw8, "timestamp": timestamp})
 		}
 
 	case GRIP_DID: // Grip: (0..255) gives raw pot value in percent from the grip (throttle twist)
 		if len(dataBytes) >= 1 {
 			raw8 := int(dataBytes[len(dataBytes)-1])
 			//pct := scalePct(raw8, 20, 59) // -> 0..100%
-			eventHub.Broadcast(map[string]any{"grip": raw8})
+			eventHub.Broadcast(map[string]any{"grip": raw8, "timestamp": timestamp})
 		}
 
 	case TPS_DID: // TPS (0..1023) -> %
@@ -344,15 +292,15 @@ func broadcastParsedSensorData(eventHub *hub.EventHub, didVal uint64, dataBytes 
 				raw = 1023
 			}
 			pct := (raw*100 + 511) / 1023 // integer rounding
-			eventHub.Broadcast(map[string]any{"tps": pct})
+			eventHub.Broadcast(map[string]any{"tps": pct, "timestamp": timestamp})
 		}
 
 	case COOLANT_DID: // Coolant °C
 		if len(dataBytes) >= 2 {
 			val := int(dataBytes[0])<<8 | int(dataBytes[1])
-			eventHub.Broadcast(map[string]any{"coolant": val - 40})
+			eventHub.Broadcast(map[string]any{"coolant": val - 40, "timestamp": timestamp})
 		} else if len(dataBytes) == 1 {
-			eventHub.Broadcast(map[string]any{"coolant": int(dataBytes[0]) - 40})
+			eventHub.Broadcast(map[string]any{"coolant": int(dataBytes[0]) - 40, "timestamp": timestamp})
 		}
 	}
 }
