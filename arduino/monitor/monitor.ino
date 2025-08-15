@@ -290,7 +290,7 @@ static inline uint8_t crc8_ccitt_update(uint8_t crc, uint8_t b) {
   return crc;
 }
 static inline uint8_t crc8_ccitt_buf(uint8_t crc, const uint8_t* p, size_t n) {
-  while (n--) crc = crc8_ccitt_step(crc, *p++);
+  while (n--) crc = crc8_ccitt_update(crc, *p++);
   return crc;
 }
 

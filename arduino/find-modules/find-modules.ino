@@ -6,88 +6,119 @@
 #define CAN_SPEED    CAN_500KBPS
 #define CAN_CLOCK    MCP_16MHZ
 
-// ===== UDS constants =====
-static const uint8_t SID_TesterPresent = 0x3E;
+// ===== Scan window (tweak as needed) =====
+static const uint16_t SCAN_START = 0x600;   // widen to catch non-engine modules
+static const uint16_t SCAN_END   = 0x7FF;
 
-// ===== Scan config =====
-// Typical 11-bit diag IDs live around 0x7E0..0x7EF; feel free to widen.
-static const uint16_t SCAN_START = 0x700;
-static const uint16_t SCAN_END   = 0x7EF;
+static const uint16_t PER_ID_WAIT_MS  = 150;   // wait for a reply
+static const uint16_t INTER_ID_GAP_MS = 20;    // gap between IDs
 
-static const uint16_t PER_ID_WAIT_MS = 25;   // how long to wait for a reply per ID
-static const uint16_t INTER_ID_GAP_MS = 20;   // small gap between IDs
+// Try several SA levels (odd numbers = RequestSeed)
+static const uint8_t SA_REQ_SUBS[] = { 0x01, 0x03, 0x05 };
+static const uint8_t SA_REQ_COUNT   = sizeof(SA_REQ_SUBS);
 
 // ===== Globals =====
 MCP2515 mcp2515(CAN_CS_PIN);
-struct can_frame rxFrame, txFrame;
-uint16_t currentId = SCAN_START;
-unsigned long lastKick = 0;
+struct can_frame rxFrame;
 
-// ===== Helpers =====
-static inline bool sendTesterPresent(uint16_t reqId) {
-  // ISO-TP single frame: [len=2] [SID=0x3E] [suppress=0x00]
-  txFrame.can_id  = reqId;       // 11-bit standard ID
-  txFrame.can_dlc = 3;
-  txFrame.data[0] = 0x02;
-  txFrame.data[1] = SID_TesterPresent;
-  txFrame.data[2] = 0x00;
-  return mcp2515.sendMessage(&txFrame) == MCP2515::ERROR_OK;
+static inline bool sendSF(uint16_t id, const uint8_t* d, uint8_t n) {
+  struct can_frame f{};
+  f.can_id  = id;
+  f.can_dlc = n + 1;
+  f.data[0] = n;                 // ISO-TP single frame length
+  memcpy(&f.data[1], d, n);
+  return mcp2515.sendMessage(&f) == MCP2515::ERROR_OK;
 }
 
-static inline bool readUntil(uint16_t expectId, uint16_t timeout_ms, struct can_frame &out) {
+static inline bool waitResp(uint16_t expectId, struct can_frame &out, uint16_t ms) {
   unsigned long t0 = millis();
-  while ((millis() - t0) < timeout_ms) {
-    if (mcp2515.readMessage(&rxFrame) == MCP2515::ERROR_OK) {
-      if (rxFrame.can_id == expectId) { out = rxFrame; return true; }
-      // else drop it (could be noise or another ECU)
+  while (millis() - t0 < ms) {
+    if (mcp2515.readMessage(&out) == MCP2515::ERROR_OK) {
+      if ((out.can_id & 0x7FF) == expectId) return true;
     }
   }
   return false;
 }
 
-static inline bool isTpPositiveOrNegResp(const struct can_frame &f) {
-  // Expect len >= 3 for both positive (02 7E 00) and negative (03 7F 3E xx) responses.
-  if (f.can_dlc < 3) return false;
-
-  // First byte is ISO-TP SF length
-  const uint8_t L = f.data[0];
-  // Sanity: L shouldn't exceed (dlc - 1)
-  if (L > (f.can_dlc - 1)) return false;
-
-  const uint8_t b1 = f.data[1];
-  if (b1 == 0x7E) {           // positive response to 0x3E
-    // Usually length==2 and data[2]==0x00
-    return true;
-  } else if (b1 == 0x7F) {    // negative response
-    if (f.can_dlc >= 4 && f.data[2] == SID_TesterPresent) return true;
-  }
-  return false;
-}
-
 static inline void printFrame(const struct can_frame &f) {
-  Serial.print("  dlc=");
-  Serial.print(f.can_dlc);
-  Serial.print(" data=");
+  uint16_t id11 = f.can_id & 0x7FF;
+  Serial.print(F(" id=0x")); Serial.print(id11, HEX);
+  Serial.print(F(" dlc="));  Serial.print(f.can_dlc);
+  Serial.print(F(" data="));
   for (uint8_t i = 0; i < f.can_dlc; i++) {
-    if (i) Serial.print(' ');
+    Serial.print(i ? ' ' : ' ');
     if (f.data[i] < 0x10) Serial.print('0');
     Serial.print(f.data[i], HEX);
   }
   Serial.println();
 }
 
-// ===== Setup / Loop =====
+static inline const char* nrcName(uint8_t nrc) {
+  switch (nrc) {
+    case 0x11: return "ServiceNotSupported";
+    case 0x12: return "SubFuncNotSupported";
+    case 0x13: return "BadLength";
+    case 0x22: return "ConditionsNotCorrect";
+    case 0x33: return "SecurityDenied";
+    case 0x36: return "TooManyAttempts";
+    case 0x37: return "DelayNotExpired";
+    case 0x78: return "ResponsePending";
+    default:   return "";
+  }
+}
+
+// Probe one physical ID using several SA request levels
+bool probeSecurityAccess(uint16_t reqId) {
+  uint16_t rspId = reqId + 8;
+  struct can_frame r{};
+
+  for (uint8_t i = 0; i < SA_REQ_COUNT; i++) {
+    uint8_t sub = SA_REQ_SUBS[i];
+    uint8_t req[] = { 0x27, sub };
+
+    if (!sendSF(reqId, req, sizeof(req))) continue;
+    bool got = waitResp(rspId, r, PER_ID_WAIT_MS);
+    if (!got) continue;
+
+    // Any reply that mentions SID 0x27 indicates presence
+    if (r.can_dlc >= 2 && r.data[1] == 0x67) {
+      Serial.print(F("[SEED] req 0x")); Serial.print(reqId, HEX);
+      Serial.print(F(" sub=0x")); Serial.print(sub, HEX);
+      printFrame(r);
+      return true;
+    } else if (r.can_dlc >= 3 && r.data[1] == 0x7F && r.data[2] == 0x27) {
+      uint8_t nrc = (r.can_dlc >= 4) ? r.data[3] : 0x00;
+      Serial.print(F("[NRC ] req 0x")); Serial.print(reqId, HEX);
+      Serial.print(F(" sub=0x")); Serial.print(sub, HEX);
+      Serial.print(F(" nrc=0x")); Serial.print(nrc, HEX);
+      const char* name = nrcName(nrc);
+      if (*name) { Serial.print(' '); Serial.print(name); }
+      printFrame(r);
+
+      // If server said ResponsePending (0x78), wait a bit longer once
+      if (nrc == 0x78) {
+        if (waitResp(rspId, r, 300)) {
+          Serial.print(F("[POST] req 0x")); Serial.print(reqId, HEX);
+          printFrame(r);
+        }
+      }
+      return true; // still marks this ID as present
+    }
+  }
+  return false;
+}
+
 void setup() {
   Serial.begin(115200);
-  while (!Serial) { /* wait for USB serial on some boards */ }
+  while (!Serial) {}
 
-  pinMode(10, OUTPUT);            // keep AVR SPI in master mode
+  pinMode(10, OUTPUT);
   pinMode(CAN_CS_PIN, OUTPUT);
 
   mcp2515.reset();
   mcp2515.setBitrate(CAN_SPEED, CAN_CLOCK);
 
-  // Open up filters to receive everything (standard IDs)
+  // Receive-all filters (standard 11-bit)
   mcp2515.setConfigMode();
   mcp2515.setFilterMask(MCP2515::MASK0, false, 0x000);
   mcp2515.setFilterMask(MCP2515::MASK1, false, 0x000);
@@ -100,44 +131,16 @@ void setup() {
   mcp2515.setNormalMode();
 
   // Flush any stale frames
-  while (mcp2515.readMessage(&rxFrame) == MCP2515::ERROR_OK) { /* drop */ }
+  while (mcp2515.readMessage(&rxFrame) == MCP2515::ERROR_OK) {}
 
-  Serial.println(F("UDS TesterPresent scanner starting…"));
-  Serial.print(F("Range: 0x"));
+  Serial.print(F("SecurityAccess probe: 0x"));
   Serial.print(SCAN_START, HEX);
   Serial.print(F(" → 0x"));
   Serial.println(SCAN_END, HEX);
 
-  lastKick = millis();
-}
-
-void loop() {
-  if (currentId > SCAN_END) {
-    // done; restart (or comment this to stop after one pass)
-    Serial.println(F("Scan complete. Paused"));
-    //currentId = SCAN_START;
-    delay(10000);
+  for (uint16_t id = SCAN_START; id <= SCAN_END; id++) {
+    (void)probeSecurityAccess(id);
+    delay(INTER_ID_GAP_MS);
   }
-
-  // Send TP to current ID
-  uint16_t reqId  = currentId;
-  uint16_t respId = (uint16_t)(reqId + 8); // standard 11-bit UDS pairing
-
-  if (sendTesterPresent(reqId)) {
-    struct can_frame got;
-    if (readUntil(respId, PER_ID_WAIT_MS, got) && isTpPositiveOrNegResp(got)) {
-      Serial.print(F("[HIT] req 0x"));
-      Serial.print(reqId, HEX);
-      Serial.print(F("  resp 0x"));
-      Serial.print(respId, HEX);
-      Serial.println(F("  (TesterPresent)"));
-      printFrame(got);
-    }
-  } else {
-    Serial.print(F("[TX FAIL] 0x"));
-    Serial.println(reqId, HEX);
-  }
-
-  currentId++;
-  delay(INTER_ID_GAP_MS);
+  Serial.println(F("Scan complete."));
 }
