@@ -15,7 +15,7 @@ static const uint16_t SCAN_START = 0x700;
 static const uint16_t SCAN_END   = 0x7EF;
 
 static const uint16_t PER_ID_WAIT_MS = 25;   // how long to wait for a reply per ID
-static const uint16_t INTER_ID_GAP_MS = 5;   // small gap between IDs
+static const uint16_t INTER_ID_GAP_MS = 20;   // small gap between IDs
 
 // ===== Globals =====
 MCP2515 mcp2515(CAN_CS_PIN);
@@ -114,9 +114,9 @@ void setup() {
 void loop() {
   if (currentId > SCAN_END) {
     // done; restart (or comment this to stop after one pass)
-    Serial.println(F("Scan complete. Restarting…"));
-    currentId = SCAN_START;
-    delay(500);
+    Serial.println(F("Scan complete. Paused"));
+    //currentId = SCAN_START;
+    delay(10000);
   }
 
   // Send TP to current ID
