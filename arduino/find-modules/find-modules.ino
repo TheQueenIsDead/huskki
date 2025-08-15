@@ -144,3 +144,5 @@ void setup() {
   }
   Serial.println(F("Scan complete."));
 }
+
+void loop() {}
